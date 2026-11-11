@@ -35,16 +35,18 @@ link script: run `node scripts/hydrate-symlinks.js` from inside `node_modules/@e
 | `src/runtime/limits.ts` | §10.9, SM-2 | Latency watchdog (filler 1.8 s, recovery 4 s) and the call clock (warn 13 min, end 15 min) |
 | `sim/model/` | D-04b | Model-driven runs: the model under test is the receptionist behind the deterministic runtime, a second model plays the caller, graders check the database; `node sim/model/run.ts` (dry run unless `--yes`, hard budget cap) |
 | `sim/fake-google.ts` | §17 | Google Calendar API v3 stand-in (shapes, 409, 410, 401, injected faults) |
-| `spikes/livekit-transfer/PLAN.md` | D-04 | The screened-transfer spike on LiveKit — awaiting the owner's yes for its downloads |
+| `spikes/livekit-transfer/` | D-04, SM-9 | The screened-transfer spike on self-hosted LiveKit + SIPp: seven cases pass (12 Nov 2026). Start at its `RESULTS.md`; `PLAN.md` was the plan |
 | `sim/` | §17 | Seed, the scripted stand-in for the voice runtime (`session.ts`), and the demo (`run.ts`) |
 | `test/` | §17 | Acceptance scenarios by AT id |
 
 ## Gate A limits (by design, not bugs)
 
-- No voice runtime, telephony or LLM: `sim/session.ts` plays the runtime and the "model" parts come from scripts.
-  The LiveKit spike (screened transfer with DTMF) and model-driven simulated callers are the next Gate A steps.
-- Transfers are simulated (`transfer_sim`); only DTMF "1" counts as a human (INV-09). The LiveKit spike will prove it over SIP.
-- Model-driven runs need Anthropic credentials (`ANTHROPIC_API_KEY` or an `ant auth login` profile) and the owner's yes to spend; the
+- No voice runtime, telephony or LLM in `npm test`: `sim/session.ts` plays the runtime and the "model" parts come from
+  scripts. Model-driven simulated callers (`npm run model:run -- --yes`) are the next Gate A step.
+- Transfers are simulated in the engine (`transfer_sim`); only DTMF "1" counts as a human (INV-09). The LiveKit spike
+  proved the real thing over SIP on 12 Nov 2026 (`spikes/livekit-transfer/RESULTS.md`): staff is screened in the
+  caller's room with the caller's track muted at the server, because self-hosted LiveKit has no MoveParticipant.
+- Model-driven runs need Anthropic credentials (`ANTHROPIC_API_KEY` in the git-ignored `.env.local`, or an `ant auth login` profile) and the owner's yes to spend (given 12 Nov 2026); the
   Opus 5.5 and Sonnet 5.5 calls opt into the server-side refusal fallback (`fallbacks: "default"`).
 - Recording is off by default for Thai tenants (D-09); the policy flag `recording` turns it on (the greeting then says so).
 - The owner web reply page accepts its one-time token alone; production also needs an owner session.
