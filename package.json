@@ -1,0 +1,24 @@
+{
+  "name": "receptionist-engine",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Gate A (simulation only) engine for the clean-room AI receptionist. Synthetic data and stand-in providers only.",
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "db:start": "node scripts/db.ts start",
+    "db:stop": "node scripts/db.ts stop",
+    "db:status": "node scripts/db.ts status",
+    "migrate": "node scripts/migrate.ts",
+    "test": "node --test --test-concurrency=1 test/",
+    "sim": "node sim/run.ts"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  },
+  "optionalDependencies": {
+    "@embedded-postgres/darwin-arm64": "^18.4.0-beta.17"
+  }
+}
