@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<scenario name="staff_voicemail">
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="c=IN IP4 ([0-9.]+)" search_in="body" check_it="true" assign_to="c,rip"/>
+      <ereg regexp="m=audio ([0-9]+)" search_in="body" check_it="true" assign_to="m,rport"/>
+      <ereg regexp="a=rtpmap:([0-9]+) telephone-event" search_in="body" check_it="false" assign_to="t,dpt"/>
+    </action>
+  </recv>
+  <Reference variables="c,m,t,dpt"/>
+  <send><![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:staff@192.168.5.2:[local_port]>
+Content-Length: 0
+]]></send>
+  <pause milliseconds="1000"/>
+  <send retrans="500"><![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[pid]SIPpTag01[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:staff@192.168.5.2:[local_port]>
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=staff 1 1 IN IP4 192.168.5.2
+s=-
+c=IN IP4 192.168.5.2
+t=0 0
+m=audio 7100 RTP/AVP 0 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+]]></send>
+  <recv request="ACK" crlf="true"/>
+  <nop><action><exec command="node ../media.mjs staff [caseid] 7100 [$rip] [$rport] 1000"/></action></nop>
+  <pause milliseconds="1000"/>
+  <recv request="BYE" timeout="60000" ontimeout="end"/>
+  <send><![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+]]></send>
+  <label id="end"/>
+</scenario>

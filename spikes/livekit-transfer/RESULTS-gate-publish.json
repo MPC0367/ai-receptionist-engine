@@ -1,0 +1,133 @@
+{
+  "gate": "publish",
+  "server": "livekit-server v1.13 + livekit/sip v1.23 (self-hosted, colima)",
+  "moveParticipant": "not implemented",
+  "ran": "2026-11-11T17:54:59.097Z",
+  "cases": [
+    {
+      "id": "S1",
+      "title": "human accepts (DTMF 1)",
+      "expect": "bridged",
+      "outcome": "bridged",
+      "pass": false,
+      "at": {
+        "dial": 2863,
+        "answer": 3909,
+        "decision": 8016,
+        "bridge": 13123
+      },
+      "checks": [
+        [
+          "caller heard no whisper or staff/voicemail audio while screening",
+          true
+        ],
+        [
+          "staff/voicemail heard none of the caller while screening",
+          true
+        ],
+        [
+          "staff heard the whisper",
+          true
+        ],
+        [
+          "after the bridge the caller hears staff",
+          true
+        ],
+        [
+          "after the bridge staff hears the caller",
+          false
+        ],
+        [
+          "no staff leg left behind",
+          true
+        ]
+      ],
+      "media": {
+        "caller_rx_packets": 681,
+        "staff_rx_packets": 616,
+        "screening": {
+          "caller": {
+            "windows": 41,
+            "whisper": false,
+            "caller": false,
+            "staff": false
+          },
+          "staff": {
+            "windows": 40,
+            "whisper": true,
+            "caller": false,
+            "staff": false
+          }
+        },
+        "after": {
+          "caller": {
+            "windows": 27,
+            "whisper": false,
+            "caller": false,
+            "staff": true
+          },
+          "staff": {
+            "windows": 27,
+            "whisper": false,
+            "caller": false,
+            "staff": false
+          }
+        }
+      },
+      "timeline": [
+        [
+          258,
+          "call room created"
+        ],
+        [
+          324,
+          "runtime joined"
+        ],
+        [
+          2863,
+          "caller set to hear nothing and publish nothing"
+        ],
+        [
+          2863,
+          "dialling staff into the call room"
+        ],
+        [
+          2888,
+          "staff leg joined (dialling)"
+        ],
+        [
+          2891,
+          "staff leg unsubscribed from caller"
+        ],
+        [
+          3909,
+          "staff answered"
+        ],
+        [
+          5910,
+          "whisper played"
+        ],
+        [
+          7967,
+          "DTMF 1 from staff"
+        ],
+        [
+          13120,
+          "caller track NOT published again"
+        ],
+        [
+          13123,
+          "bridged 9214 ms after staff answered"
+        ],
+        [
+          16125,
+          "outcome bridged"
+        ],
+        [
+          16208,
+          "caller sipp exit 1"
+        ]
+      ]
+    }
+  ]
+}

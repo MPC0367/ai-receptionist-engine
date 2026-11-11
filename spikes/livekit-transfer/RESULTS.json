@@ -1,0 +1,699 @@
+{
+  "gate": "mute",
+  "server": "livekit-server v1.13 + livekit/sip v1.23 (self-hosted, colima)",
+  "moveParticipant": "not implemented",
+  "ran": "2026-11-11T17:56:55.252Z",
+  "cases": [
+    {
+      "id": "S1",
+      "title": "human accepts (DTMF 1)",
+      "expect": "bridged",
+      "outcome": "bridged",
+      "pass": true,
+      "at": {
+        "dial": 2868,
+        "answer": 3916,
+        "decision": 7968,
+        "bridge": 8030
+      },
+      "checks": [
+        [
+          "caller heard no whisper or staff/voicemail audio while screening",
+          true
+        ],
+        [
+          "staff/voicemail heard none of the caller while screening",
+          true
+        ],
+        [
+          "staff heard the whisper",
+          true
+        ],
+        [
+          "after the bridge the caller hears staff",
+          true
+        ],
+        [
+          "after the bridge staff hears the caller",
+          true
+        ],
+        [
+          "no staff leg left behind",
+          true
+        ]
+      ],
+      "media": {
+        "caller_rx_packets": 422,
+        "staff_rx_packets": 358,
+        "screening": {
+          "caller": {
+            "windows": 41,
+            "whisper": false,
+            "caller": false,
+            "staff": false
+          },
+          "staff": {
+            "windows": 40,
+            "whisper": true,
+            "caller": false,
+            "staff": false
+          }
+        },
+        "after": {
+          "caller": {
+            "windows": 27,
+            "whisper": false,
+            "caller": false,
+            "staff": true
+          },
+          "staff": {
+            "windows": 27,
+            "whisper": false,
+            "caller": true,
+            "staff": false
+          }
+        }
+      },
+      "timeline": [
+        [
+          264,
+          "call room created"
+        ],
+        [
+          334,
+          "runtime joined"
+        ],
+        [
+          2864,
+          "caller set to hear nothing"
+        ],
+        [
+          2868,
+          "caller track muted at the server"
+        ],
+        [
+          2868,
+          "dialling staff into the call room"
+        ],
+        [
+          2891,
+          "staff leg joined (dialling)"
+        ],
+        [
+          2895,
+          "staff leg unsubscribed from caller"
+        ],
+        [
+          3916,
+          "staff answered"
+        ],
+        [
+          5919,
+          "whisper played"
+        ],
+        [
+          7962,
+          "DTMF 1 from staff"
+        ],
+        [
+          8030,
+          "bridged 4114 ms after staff answered"
+        ],
+        [
+          11030,
+          "outcome bridged"
+        ],
+        [
+          11039,
+          "caller sipp exit 1"
+        ]
+      ]
+    },
+    {
+      "id": "S2",
+      "title": "voicemail answers, no DTMF",
+      "expect": "returning:no_dtmf",
+      "outcome": "returning:no_dtmf",
+      "pass": true,
+      "at": {
+        "dial": 2862,
+        "answer": 3903,
+        "decision": 13917
+      },
+      "checks": [
+        [
+          "caller heard no whisper or staff/voicemail audio while screening",
+          true
+        ],
+        [
+          "staff/voicemail heard none of the caller while screening",
+          true
+        ],
+        [
+          "staff heard the whisper",
+          true
+        ],
+        [
+          "a staff leg that did not accept never heard the caller",
+          true
+        ],
+        [
+          "no staff leg left behind",
+          true
+        ]
+      ],
+      "media": {
+        "caller_rx_packets": 554,
+        "staff_rx_packets": 500,
+        "screening": {
+          "caller": {
+            "windows": 100,
+            "whisper": false,
+            "caller": false,
+            "staff": false
+          },
+          "staff": {
+            "windows": 99,
+            "whisper": true,
+            "caller": false,
+            "staff": false
+          }
+        }
+      },
+      "timeline": [
+        [
+          259,
+          "call room created"
+        ],
+        [
+          324,
+          "runtime joined"
+        ],
+        [
+          2858,
+          "caller set to hear nothing"
+        ],
+        [
+          2862,
+          "caller track muted at the server"
+        ],
+        [
+          2862,
+          "dialling staff into the call room"
+        ],
+        [
+          2883,
+          "staff leg joined (dialling)"
+        ],
+        [
+          2887,
+          "staff leg unsubscribed from caller"
+        ],
+        [
+          3903,
+          "staff answered"
+        ],
+        [
+          5904,
+          "whisper played"
+        ],
+        [
+          13921,
+          "staff leg removed"
+        ],
+        [
+          13926,
+          "caller hears the AI again"
+        ],
+        [
+          13929,
+          "outcome returning:no_dtmf"
+        ],
+        [
+          13972,
+          "caller sipp exit 1"
+        ]
+      ]
+    },
+    {
+      "id": "S3",
+      "title": "staff declines (DTMF 2)",
+      "expect": "returning:declined",
+      "outcome": "returning:declined",
+      "pass": true,
+      "at": {
+        "dial": 2856,
+        "answer": 3917,
+        "decision": 7958
+      },
+      "checks": [
+        [
+          "caller heard no whisper or staff/voicemail audio while screening",
+          true
+        ],
+        [
+          "staff/voicemail heard none of the caller while screening",
+          true
+        ],
+        [
+          "staff heard the whisper",
+          true
+        ],
+        [
+          "a staff leg that did not accept never heard the caller",
+          true
+        ],
+        [
+          "no staff leg left behind",
+          true
+        ]
+      ],
+      "media": {
+        "caller_rx_packets": 261,
+        "staff_rx_packets": 205,
+        "screening": {
+          "caller": {
+            "windows": 40,
+            "whisper": false,
+            "caller": false,
+            "staff": false
+          },
+          "staff": {
+            "windows": 40,
+            "whisper": true,
+            "caller": false,
+            "staff": false
+          }
+        }
+      },
+      "timeline": [
+        [
+          258,
+          "call room created"
+        ],
+        [
+          329,
+          "runtime joined"
+        ],
+        [
+          2852,
+          "caller set to hear nothing"
+        ],
+        [
+          2856,
+          "caller track muted at the server"
+        ],
+        [
+          2856,
+          "dialling staff into the call room"
+        ],
+        [
+          2900,
+          "staff leg joined (dialling)"
+        ],
+        [
+          2929,
+          "staff leg unsubscribed from caller"
+        ],
+        [
+          3917,
+          "staff answered"
+        ],
+        [
+          5918,
+          "whisper played"
+        ],
+        [
+          7956,
+          "DTMF 2 from staff"
+        ],
+        [
+          8016,
+          "staff leg removed"
+        ],
+        [
+          8023,
+          "caller hears the AI again"
+        ],
+        [
+          8024,
+          "outcome returning:declined"
+        ],
+        [
+          8064,
+          "caller sipp exit 1"
+        ]
+      ]
+    },
+    {
+      "id": "S4",
+      "title": "rings, never answered",
+      "expect": "returning:no_answer",
+      "outcome": "returning:no_answer",
+      "pass": true,
+      "at": {
+        "dial": 2844,
+        "decision": 22928
+      },
+      "checks": [
+        [
+          "no staff leg left behind",
+          true
+        ]
+      ],
+      "media": {
+        "caller_rx_packets": 1004,
+        "staff_rx_packets": 0
+      },
+      "timeline": [
+        [
+          255,
+          "call room created"
+        ],
+        [
+          319,
+          "runtime joined"
+        ],
+        [
+          2842,
+          "caller set to hear nothing"
+        ],
+        [
+          2844,
+          "caller track muted at the server"
+        ],
+        [
+          2844,
+          "dialling staff into the call room"
+        ],
+        [
+          2861,
+          "staff leg joined (dialling)"
+        ],
+        [
+          2864,
+          "staff leg unsubscribed from caller"
+        ],
+        [
+          22928,
+          "createSipParticipant failed: sip request timed out"
+        ],
+        [
+          22938,
+          "outcome returning:no_answer"
+        ],
+        [
+          22947,
+          "caller sipp exit 1"
+        ]
+      ]
+    },
+    {
+      "id": "S5",
+      "title": "busy (486)",
+      "expect": "returning:busy",
+      "outcome": "returning:busy",
+      "pass": true,
+      "at": {
+        "dial": 2911,
+        "decision": 2993
+      },
+      "checks": [
+        [
+          "no staff leg left behind",
+          true
+        ]
+      ],
+      "media": {
+        "caller_rx_packets": 0,
+        "staff_rx_packets": 0
+      },
+      "timeline": [
+        [
+          257,
+          "call room created"
+        ],
+        [
+          374,
+          "runtime joined"
+        ],
+        [
+          2907,
+          "caller set to hear nothing"
+        ],
+        [
+          2911,
+          "caller track muted at the server"
+        ],
+        [
+          2911,
+          "dialling staff into the call room"
+        ],
+        [
+          2931,
+          "staff leg joined (dialling)"
+        ],
+        [
+          2934,
+          "staff leg unsubscribed from caller"
+        ],
+        [
+          2993,
+          "createSipParticipant failed: SIP call failed: 486 Busy Here (failed_precondition)"
+        ],
+        [
+          3000,
+          "outcome returning:busy"
+        ],
+        [
+          3009,
+          "caller sipp exit 1"
+        ]
+      ]
+    },
+    {
+      "id": "S6",
+      "title": "caller hangs up during screening",
+      "expect": "abandoned_during_transfer",
+      "outcome": "abandoned_during_transfer",
+      "pass": true,
+      "at": {
+        "dial": 2851,
+        "answer": 3882,
+        "decision": 11922
+      },
+      "checks": [
+        [
+          "caller heard no whisper or staff/voicemail audio while screening",
+          true
+        ],
+        [
+          "staff/voicemail heard none of the caller while screening",
+          true
+        ],
+        [
+          "staff heard the whisper",
+          true
+        ],
+        [
+          "a staff leg that did not accept never heard the caller",
+          true
+        ],
+        [
+          "no staff leg left behind",
+          true
+        ]
+      ],
+      "media": {
+        "caller_rx_packets": 450,
+        "staff_rx_packets": 402,
+        "screening": {
+          "caller": {
+            "windows": 81,
+            "whisper": false,
+            "caller": false,
+            "staff": false
+          },
+          "staff": {
+            "windows": 79,
+            "whisper": true,
+            "caller": false,
+            "staff": false
+          }
+        }
+      },
+      "timeline": [
+        [
+          260,
+          "call room created"
+        ],
+        [
+          323,
+          "runtime joined"
+        ],
+        [
+          2848,
+          "caller set to hear nothing"
+        ],
+        [
+          2851,
+          "caller track muted at the server"
+        ],
+        [
+          2851,
+          "dialling staff into the call room"
+        ],
+        [
+          2866,
+          "staff leg joined (dialling)"
+        ],
+        [
+          2868,
+          "staff leg unsubscribed from caller"
+        ],
+        [
+          3882,
+          "staff answered"
+        ],
+        [
+          5883,
+          "whisper played"
+        ],
+        [
+          11869,
+          "caller sipp exit 0"
+        ],
+        [
+          11903,
+          "caller left"
+        ],
+        [
+          11920,
+          "DTMF 1 from staff"
+        ],
+        [
+          11927,
+          "staff leg removed"
+        ],
+        [
+          11929,
+          "outcome abandoned_during_transfer"
+        ]
+      ]
+    },
+    {
+      "id": "S7",
+      "title": "caller presses 1 during screening (must not accept)",
+      "expect": "returning:no_dtmf",
+      "outcome": "returning:no_dtmf",
+      "pass": true,
+      "at": {
+        "dial": 2866,
+        "answer": 3908,
+        "decision": 13948
+      },
+      "checks": [
+        [
+          "caller heard no whisper or staff/voicemail audio while screening",
+          true
+        ],
+        [
+          "staff/voicemail heard none of the caller while screening",
+          true
+        ],
+        [
+          "staff heard the whisper",
+          true
+        ],
+        [
+          "a staff leg that did not accept never heard the caller",
+          true
+        ],
+        [
+          "no staff leg left behind",
+          true
+        ],
+        [
+          "the caller's digit was ignored",
+          true
+        ]
+      ],
+      "media": {
+        "caller_rx_packets": 557,
+        "staff_rx_packets": 517,
+        "screening": {
+          "caller": {
+            "windows": 101,
+            "whisper": false,
+            "caller": false,
+            "staff": false
+          },
+          "staff": {
+            "windows": 99,
+            "whisper": true,
+            "caller": false,
+            "staff": false
+          }
+        }
+      },
+      "timeline": [
+        [
+          258,
+          "call room created"
+        ],
+        [
+          326,
+          "runtime joined"
+        ],
+        [
+          2861,
+          "caller set to hear nothing"
+        ],
+        [
+          2866,
+          "caller track muted at the server"
+        ],
+        [
+          2866,
+          "dialling staff into the call room"
+        ],
+        [
+          2887,
+          "staff leg joined (dialling)"
+        ],
+        [
+          2890,
+          "staff leg unsubscribed from caller"
+        ],
+        [
+          3908,
+          "staff answered"
+        ],
+        [
+          5910,
+          "whisper played"
+        ],
+        [
+          7442,
+          "DTMF 1 from sip_+66812345678 ignored"
+        ],
+        [
+          13983,
+          "staff leg removed"
+        ],
+        [
+          13989,
+          "caller hears the AI again"
+        ],
+        [
+          13992,
+          "outcome returning:no_dtmf"
+        ],
+        [
+          14034,
+          "caller sipp exit 1"
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "livekit-transfer-spike",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@livekit/rtc-node": "^1.2.2",
+    "livekit-server-sdk": "^2.19.3"
+  }
+}

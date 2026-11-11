@@ -4,8 +4,10 @@
 DTMF "1" during a whisper counts), and fall back cleanly otherwise — with real SIP signalling, before any phone
 number or carrier exists?
 
-**Not yet run: it needs the owner's yes for the downloads below.** Everything stays on this Mac: no LiveKit Cloud
-account, no phone number, no carrier, no speech provider (the whisper is a pre-recorded audio file).
+**Run on 12 Nov 2026 with the owner's yes ("Approve both"): all seven cases pass — see `RESULTS.md`.** One change
+from this plan: `MoveParticipant` is "not implemented" on self-hosted LiveKit, so screening happens in the caller's
+room with the caller's track muted at the server. Everything stayed on this Mac: no LiveKit Cloud account, no phone
+number, no carrier, no speech provider (the whisper is a tone).
 
 ## Topology
 
