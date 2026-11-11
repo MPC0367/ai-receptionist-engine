@@ -13,7 +13,8 @@
     "db:status": "node scripts/db.ts status",
     "migrate": "node scripts/migrate.ts",
     "test": "node --test --test-concurrency=1 test/",
-    "sim": "node sim/run.ts"
+    "sim": "node sim/run.ts",
+    "model:run": "node --env-file-if-exists=.env.local sim/model/run.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
