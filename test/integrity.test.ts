@@ -51,9 +51,10 @@ test('AT-27/28 prompt injection and smuggled envelope fields are refused; forged
   const forged = Buffer.from(JSON.stringify({ ...claims, tenant_id: B })).toString('base64url') + '.' + sig;
   const f = await callTool(forged, 'get_business_facts', { question: 'canary' }, {}, clock.now());
   assert.equal(!f.ok && f.error.code, 'AUTH_EXPIRED');
+  const stale = call.token;
   clock.advance(16 * 60_000);
-  const expired = await call.tool('get_business_facts', { question: 'canary' });
-  assert.equal(!expired.ok && expired.error.code, 'AUTH_EXPIRED');
+  const expired = await callTool(stale, 'get_business_facts', { question: 'canary' }, {}, clock.now());
+  assert.equal(!expired.ok && expired.error.code, 'AUTH_EXPIRED', 'a token not renewed by the gateway expires after 15 min');
 });
 
 test('AT-31 US two-way sender: STOP → one confirmation, later texts suppressed; START restores; HELP answers; YES confirms a target', async () => {

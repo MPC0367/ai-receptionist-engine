@@ -9,7 +9,7 @@ first with LINE as the owner channel, massage / day spa, LiveKit Agents as the f
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 54 tests (resets the rcpt_test database per test)
+npm test              # 73 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -30,6 +30,12 @@ link script: run `node scripts/hydrate-symlinks.js` from inside `node_modules/@e
 | `src/messaging/`, `src/inbound.ts` | SM-11, §5.8.5 | LINE and SMS signature checks, replay protection, STOP/START/HELP, one-time links, outbox with a sandbox transport |
 | `src/jobs.ts`, `src/handlers.ts` | §11.8 | Postgres job queue: outbox dispatch with retries and dead-lettering, PQ reminders/expiry/late close, KC expiry |
 | `src/metering.ts` | SM-14 | Billable-conversation rule v1 (draft, D-02), exactly once per conversation |
+| `src/privacy.ts` | SM-12, SM-13 | Transcripts and stand-in recordings; retention passes (recordings 30 d incl. the provider's copy, content 90 d) honouring legal holds; code-verified deletion requests with an evidence package |
+| `src/connectors/calendar.ts` | SM-10, §7.8 | Google Calendar: free/busy only from the owner's calendars, bookings mirrored to an app-created calendar with deterministic event ids, scope check, pause on revoked access, 410 resync, owner edits → staff tasks |
+| `src/runtime/limits.ts` | §10.9, SM-2 | Latency watchdog (filler 1.8 s, recovery 4 s) and the call clock (warn 13 min, end 15 min) |
+| `sim/model/` | D-04b | Model-driven runs: the model under test is the receptionist behind the deterministic runtime, a second model plays the caller, graders check the database; `node sim/model/run.ts` (dry run unless `--yes`, hard budget cap) |
+| `sim/fake-google.ts` | §17 | Google Calendar API v3 stand-in (shapes, 409, 410, 401, injected faults) |
+| `spikes/livekit-transfer/PLAN.md` | D-04 | The screened-transfer spike on LiveKit — awaiting the owner's yes for its downloads |
 | `sim/` | §17 | Seed, the scripted stand-in for the voice runtime (`session.ts`), and the demo (`run.ts`) |
 | `test/` | §17 | Acceptance scenarios by AT id |
 
@@ -37,7 +43,10 @@ link script: run `node scripts/hydrate-symlinks.js` from inside `node_modules/@e
 
 - No voice runtime, telephony or LLM: `sim/session.ts` plays the runtime and the "model" parts come from scripts.
   The LiveKit spike (screened transfer with DTMF) and model-driven simulated callers are the next Gate A steps.
-- Transfers are simulated (`transfer_sim`); only DTMF "1" counts as a human (INV-09).
+- Transfers are simulated (`transfer_sim`); only DTMF "1" counts as a human (INV-09). The LiveKit spike will prove it over SIP.
+- Model-driven runs need Anthropic credentials (`ANTHROPIC_API_KEY` or an `ant auth login` profile) and the owner's yes to spend; the
+  Opus 5.5 and Sonnet 5.5 calls opt into the server-side refusal fallback (`fallbacks: "default"`).
+- Recording is off by default for Thai tenants (D-09); the policy flag `recording` turns it on (the greeting then says so).
 - The owner web reply page accepts its one-time token alone; production also needs an owner session.
 - Knowledge retrieval is keyword-based with Thai word segmentation (`Intl.Segmenter`); embeddings come later.
 - The link domain `r.example.invalid` is a placeholder; a real one must be registered for Thai SMS (NBTC).

@@ -6,17 +6,20 @@
 import { createHash } from 'node:crypto';
 import { idHash, uuid, withSystem, withTenant } from '../src/db.ts';
 import { callTool, type Meta, type ToolResult } from '../src/tools/gateway.ts';
-import { mintCallToken } from '../src/tools/token.ts';
+import { mintCallToken, type CallClaims } from '../src/tools/token.ts';
+import { callClock, WARN } from '../src/runtime/limits.ts';
 import { grounded } from '../src/knowledge.ts';
 import { safetyGate, cleanSummary, isEmergency } from '../src/escalation/safety.ts';
 import { closeConversation } from '../src/metering.ts';
+import { persistCallArtifacts } from '../src/privacy.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 export const T = {
-  greeting: (name: string, lang: 'th' | 'en') => lang === 'th'
-    ? `สวัสดีค่ะ ${name} ค่ะ ดิฉันเป็นผู้ช่วย AI ของร้าน การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ`
-    : `Hi, you've reached ${name}. I'm the business's AI assistant. This call may be recorded to help with your booking.`,
+  // §10.1: the recording clause is present only when the tenant records (D-09: off by default in Thailand).
+  greeting: (name: string, lang: 'th' | 'en', recording: boolean) => lang === 'th'
+    ? `สวัสดีค่ะ ${name} ค่ะ ดิฉันเป็นผู้ช่วย AI ของร้าน${recording ? ' การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ' : 'ค่ะ'}`
+    : `Hi, you've reached ${name}. I'm the business's AI assistant.${recording ? ' This call may be recorded to help with your booking.' : ''}`,
   unknown: (lang: 'th' | 'en') => lang === 'th' ? 'ดิฉันยังไม่มีคำตอบที่ยืนยันได้สำหรับเรื่องนี้ และไม่อยากเดาค่ะ' : "I don't have a confirmed answer to that, and I don't want to guess.",
   slotTaken: (lang: 'th' | 'en') => lang === 'th' ? 'ขออภัยค่ะ เวลานั้นเพิ่งมีคนจองไป' : 'That time was just taken.',
 };
@@ -32,6 +35,7 @@ export class Call {
   static async start(o: { dialed: string; ani: string | null; lang?: 'th' | 'en'; now: () => Date; isTest?: boolean }) {
     const call = new Call(o.now);
     call.lang = o.lang ?? 'th';
+    call.startedAt = o.now().getTime();
     call.ani = o.ani;
     const route = await withSystem(async tx => (await tx.query('select tenant_id, location_id from phone_numbers where e164 = $1', [o.dialed])).rows[0]);
     if (!route) return { call, unrouted: true };
@@ -43,11 +47,15 @@ export class Call {
         values ($1,$2,'voice',$3,$4,$5,'in_dialogue',$6,$7,$8,$9)`,
         [call.tenantId, call.conversationId, `sim-${call.conversationId}`, o.ani, o.ani ? idHash(o.ani) : null, cfg?.number ?? 1, o.now(), call.lang, !!o.isTest]);
       const country = (await tx.query('select country from tenants')).rows[0].country;
-      call.token = mintCallToken({ tenant_id: call.tenantId, location_id: route.location_id, conversation_id: call.conversationId, config_version: cfg?.number ?? 1,
-        ani: o.ani, lang: call.lang, jurisdiction: country }, o.now());
+      call.recordingOn = !!(await tx.query('select body from policies order by version desc limit 1')).rows[0]?.body?.recording;
+      await tx.query('update conversations set recording_on = $2 where id = $1', [call.conversationId, call.recordingOn]);
+      call.claims = { tenant_id: call.tenantId, location_id: route.location_id, conversation_id: call.conversationId, config_version: cfg?.number ?? 1,
+        ani: o.ani, lang: call.lang, jurisdiction: country };
+      call.token = mintCallToken(call.claims, o.now());
+      call.tokenAt = o.now().getTime();
       return (await tx.query('select name from locations limit 1')).rows[0].name as string;
     });
-    call.say(T.greeting(name, call.lang));
+    call.say(T.greeting(name, call.lang, call.recordingOn));
     return { call, unrouted: false };
   }
 
@@ -65,7 +73,30 @@ export class Call {
   say(text: string) { const seq = this.turns.length; this.turns.push({ seq, who: 'ai', text }); return seq; }
   hear(text: string) { const seq = this.turns.length; this.turns.push({ seq, who: 'caller', text }); this.callerUtterances++; this.corpus.push(text); return seq; }
 
+  claims: Omit<CallClaims, 'exp' | 'jti'> | null = null;
+  tokenAt = 0;
+  warned = false;
+
+  /** The telephony gateway renews the 15-minute call token while the call is live (blueprint §6.3). */
+  private renew() {
+    if (this.claims && this.now().getTime() - this.tokenAt > 10 * 60_000) { this.token = mintCallToken(this.claims, this.now()); this.tokenAt = this.now().getTime(); }
+  }
+
+  /** Call-length policy, checked before every caller turn: warn at 13 min, wrap up and end at 15 (AT-48). */
+  async checkClock(): Promise<'continue' | 'warn' | 'ended'> {
+    const c = callClock(this.now().getTime() - this.startedAt, this.warned);
+    if (c === 'warn') { this.warned = true; this.say(WARN[this.lang]); return 'warn'; }
+    if (c === 'end') {
+      const done = this.outcomes.includes('booked') ? (this.lang === 'th' ? 'การจองของคุณบันทึกไว้แล้วค่ะ ' : 'Your booking is saved. ') : '';
+      this.say(`${done}${this.lang === 'th' ? 'ขอบคุณที่โทรมาค่ะ สวัสดีค่ะ' : 'Thank you for calling. Goodbye.'}`);
+      await this.end('max_duration');
+      return 'ended';
+    }
+    return 'continue';
+  }
+
   async tool(name: string, args: unknown, meta: Meta = {}): Promise<ToolResult> {
+    this.renew();
     const r = await callTool(this.token, name, args, meta, this.now());
     if (r.ok) this.corpus.push(JSON.stringify(r.data));
     return r;
@@ -151,7 +182,27 @@ export class Call {
     return { outcome: 'pq_created', tier: gate.tier, pq: pq.data };
   }
 
+  recordingOn = false;
+  startedAt = 0;
+
+  /** AT-33: the caller objects — recording stops at this offset; the call continues. */
+  async objectToRecording() {
+    this.hear(this.lang === 'th' ? 'ไม่ต้องอัดเสียงนะคะ' : "Please don't record this.");
+    this.recordingOn = false;
+    const offset = this.now().getTime() - this.startedAt;
+    await withTenant(this.tenantId, tx => tx.query(`update conversations set recording_on = false, recording_stopped_offset_ms = $2 where id = $1`, [this.conversationId, offset]));
+    this.say(this.lang === 'th' ? 'ได้ค่ะ ปิดการบันทึกเสียงแล้วค่ะ' : "Okay, I've turned recording off.");
+  }
+
   async end(endedBy: 'caller' | 'ai' | 'max_duration' | 'system_fault' = 'caller', spam = false) {
-    return withTenant(this.tenantId, tx => closeConversation(tx, this.tenantId, { conversationId: this.conversationId, now: this.now(), endedBy, callerUtterances: this.callerUtterances, spam, outcomes: this.outcomes }));
+    return withTenant(this.tenantId, async tx => {
+      const closed = await closeConversation(tx, this.tenantId, { conversationId: this.conversationId, now: this.now(), endedBy, callerUtterances: this.callerUtterances, spam, outcomes: this.outcomes });
+      if (!('already' in closed)) {
+        // A recording exists only if recording was never refused; in production the stopped call keeps audio up to the offset.
+        await persistCallArtifacts(tx, this.tenantId, { conversationId: this.conversationId, turns: this.turns, recordingOn: this.recordingOn,
+          durationMs: this.now().getTime() - this.startedAt, now: this.now() });
+      }
+      return closed;
+    });
   }
 }

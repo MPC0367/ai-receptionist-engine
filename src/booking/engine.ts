@@ -8,6 +8,7 @@ import { audit, idHash, sha256, uuid } from '../db.ts';
 import { addDays, isoWeekday, localParts, localToUtc, minutes, type LocalDate, type LocalTime } from '../time/zone.ts';
 import { renderDateTime, type Window } from '../time/resolve.ts';
 import { ToolError } from '../tools/errors.ts';
+import { scheduleMirror } from '../connectors/calendar.ts';
 
 const SLOT_SECRET = process.env.RCPT_SLOT_SECRET ?? uuid() + uuid();
 export const HOLD_TTL_MS = 180_000;
@@ -161,6 +162,15 @@ export function confirmationText(lang: 'th' | 'en', a: { variant: Variant; staff
   return `To confirm: ${a.variant.name_en ?? a.variant.name} with ${a.staff.en} on ${when}${price}${a.name ? `, under the name ${a.name}` : ''}. Shall I book it?`;
 }
 
+/**
+ * Serialise claim changes per staff member. Concurrent inserts of overlapping rows under an exclusion constraint can
+ * deadlock (each waits for the other's uncommitted row); the lock removes that, and the constraint stays the guarantee.
+ * Always taken before any audit insert (which takes the tenant's audit lock), so the lock order is fixed.
+ */
+export async function lockResource(tx: Tx, resourceId: string) {
+  await tx.query(`select pg_advisory_xact_lock(hashtextextended($1, 7))`, ['claim:' + resourceId]);
+}
+
 export async function holdSlot(tx: Tx, tenantId: string, a: { slotToken: string; conversationId: string; clientName?: string; now: Date; replacesAppointment?: string }) {
   const p = verifySlot(a.slotToken, tenantId, a.now);
   const v = await variant(tx, p.v);
@@ -170,6 +180,7 @@ export async function holdSlot(tx: Tx, tenantId: string, a: { slotToken: string;
   const staff = { th: sr.display_name as string, en: (sr.name_en ?? sr.display_name) as string };
   const holdRef = uuid();
   const span = `[${new Date(p.st).toISOString()},${new Date(p.en).toISOString()})`;
+  await lockResource(tx, p.s);
   await tx.query(`update slot_claims set status = 'expired' where resource_id = $1 and kind = 'hold' and status = 'active' and hold_expires_at < $2`, [p.s, a.now]);
   try {
     await tx.query('savepoint claim');
@@ -230,6 +241,7 @@ export async function releaseHold(tx: Tx, tenantId: string, holdRef: string, now
 
 /** Make sure the hold's claim is still ours and active; if it expired and was swept, try to claim again. */
 async function secureHoldClaim(tx: Tx, tenantId: string, hold: any, now: Date) {
+  await lockResource(tx, hold.staff_id);
   const c = await tx.query(`select id from slot_claims where hold_ref = $1 and status = 'active' for update`, [hold.hold_ref]);
   if (c.rowCount) return c.rows[0].id as string;
   try {
@@ -302,9 +314,15 @@ export async function createBooking(tx: Tx, tenantId: string, a: {
   await tx.query(`insert into appointment_events (tenant_id, id, appointment_id, kind, after, actor) values ($1,$2,$3,'created',$4,'ai_runtime')`,
     [tenantId, uuid(), apptId, JSON.stringify({ starts_at: h.starts_at, staff: h.staff_id, variant: h.variant_id })]);
   await audit(tx, tenantId, { machine: 'SM-3', entity: apptId, from: 'committing', to: 'booked', event: 'booked', actor: 'ai_runtime', correlation: a.conversationId, at: a.now });
+  await mirrorIfConnected(tx, tenantId, h.staff_id, apptId, 1, a.now);
   const summary = { th: h.rendered_th.replace(/^ขอทวนนะคะ: /, 'จองเรียบร้อยแล้วค่ะ: ').replace(/ ยืนยันจองเลยไหมคะ$/, ''), en: h.rendered_en.replace(/^To confirm: /, 'You are booked: ').replace(/ Shall I book it\?$/, '') };
   await a.notify(tx, 'booked', apptId, summary, a.phone);
   return { booking_ref: apptId, version: 1, rendered_summary: summary };
+}
+
+async function mirrorIfConnected(tx: Tx, tenantId: string, staffId: string, appointmentId: string, version: number, now: Date) {
+  const c = await tx.query(`select 1 from calendar_connections where resource_id = $1 and mirror_calendar_id is not null`, [staffId]);
+  if (c.rowCount) await scheduleMirror(tx, tenantId, appointmentId, version, now);
 }
 
 export async function bookingsForCaller(tx: Tx, a: { phone: string | null; now: Date; tz: string }) {
@@ -336,6 +354,7 @@ export async function rescheduleBooking(tx: Tx, tenantId: string, a: {
   const h = await loadHold(tx, a.holdRef, a.conf);
   if (h.replaces_appointment !== a.bookingRef) throw new ToolError('VALIDATION_FAILED', 'hold was not made for this booking');
   // Release the old claims first, then secure the new one: one transaction, so a conflict rolls everything back.
+  await lockResource(tx, h.staff_id);
   await tx.query(`update slot_claims set status = 'released' where (appointment_id = $1 or hold_ref = $2) and status = 'active'`, [a.bookingRef, a.holdRef]);
   try {
     await tx.query('savepoint move');
@@ -355,6 +374,7 @@ export async function rescheduleBooking(tx: Tx, tenantId: string, a: {
   await tx.query(`insert into appointment_events (tenant_id, id, appointment_id, kind, before, after, actor) values ($1,$2,$3,'rescheduled',$4,$5,'ai_runtime')`,
     [tenantId, uuid(), a.bookingRef, JSON.stringify({ starts_at: ap.starts_at }), JSON.stringify({ starts_at: h.starts_at })]);
   await audit(tx, tenantId, { machine: 'SM-5', entity: a.bookingRef, from: 'committing', to: 'rescheduled', event: 'rescheduled', actor: 'ai_runtime', at: a.now });
+  await mirrorIfConnected(tx, tenantId, h.staff_id, a.bookingRef, Number(upd.rows[0].version), a.now);
   const text = { th: h.rendered_th.replace(/^ขอทวนนะคะ: /, 'เลื่อนนัดเรียบร้อยแล้วค่ะ: ').replace(/ ยืนยันจองเลยไหมคะ$/, ''), en: h.rendered_en.replace(/^To confirm: /, 'Moved to: ').replace(/ Shall I book it\?$/, '') };
   await a.notify(tx, 'rescheduled', a.bookingRef, text, a.phone);
   return { booking_ref: a.bookingRef, new_version: Number(upd.rows[0].version), rendered_summary: text };
@@ -383,7 +403,9 @@ export async function cancelBooking(tx: Tx, tenantId: string, a: {
   if (!c || Buffer.from(c.spokenSha256, 'hex').compare(sha256(sentence.th + '\n' + sentence.en)) !== 0 || !(c.confirmTurn > c.spokenTurn)) {
     throw new ToolError('VALIDATION_FAILED', 'cancellation must follow its spoken confirmation');
   }
+  const staffRow = (await tx.query(`select resource_id from slot_claims where appointment_id = $1 and status = 'active' limit 1`, [a.bookingRef])).rows[0];
   await tx.query(`update appointments set status = 'cancelled', version = version + 1 where id = $1`, [a.bookingRef]);
+  if (staffRow) await mirrorIfConnected(tx, tenantId, staffRow.resource_id, a.bookingRef, a.expectedVersion + 1, a.now);
   await tx.query(`update slot_claims set status = 'released' where appointment_id = $1 and status = 'active'`, [a.bookingRef]);
   await tx.query(`insert into appointment_events (tenant_id, id, appointment_id, kind, before, actor) values ($1,$2,$3,'cancelled',$4,'ai_runtime')`,
     [tenantId, uuid(), a.bookingRef, JSON.stringify({ status: 'booked' })]);

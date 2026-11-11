@@ -53,7 +53,7 @@ export async function seed(database = process.env.RCPT_DB ?? 'rcpt', reset = tru
       if (wd <= 6) await q(`insert into business_hours (tenant_id, id, location_id, resource_id, weekday, opens, closes) values ($1,$2,$3,$4,$5,'10:00','20:00')`, [A, u(A, 110 + wd), IDS.A.loc, IDS.A.nok, wd]);
       if (wd >= 2) await q(`insert into business_hours (tenant_id, id, location_id, resource_id, weekday, opens, closes) values ($1,$2,$3,$4,$5,'12:00','20:00')`, [A, u(A, 120 + wd), IDS.A.loc, IDS.A.fon, wd]);
     }
-    const policy = { lead_min: 60, horizon_days: 62, slot_step_min: 30, change_window_h: 24, max_bookings_per_number_24h: 2,
+    const policy = { recording: false, lead_min: 60, horizon_days: 62, slot_step_min: 30, change_window_h: 24, max_bookings_per_number_24h: 2,
       cancel_text: { th: 'ยกเลิกน้อยกว่า 24 ชั่วโมงก่อนนัด ทางร้านขอสงวนสิทธิ์เก็บมัดจำค่ะ', en: 'Cancelling less than 24 hours before the appointment keeps the deposit.' } };
     await q(`insert into policies (tenant_id, id, version, body) values ($1,$2,1,$3)`, [A, u(A, 40), JSON.stringify(policy)]);
     await q(`insert into configuration_versions (tenant_id, id, number, status, snapshot, snapshot_sha256, published_at) values ($1,$2,1,'published',$3,$4,$5)`,
@@ -98,7 +98,7 @@ export async function seed(database = process.env.RCPT_DB ?? 'rcpt', reset = tru
     await q(`insert into resource_services values ($1,$2,$3)`, [C, IDS.C.sam, IDS.C.cut]);
     await en(C, 'service_variants', IDS.C.cut, 'haircut, 30 minutes'); await en(C, 'resources', IDS.C.sam, 'Sam');
     await q(`insert into business_hours (tenant_id, id, location_id, weekday, opens, closes) values ($1,$2,$3,7,'00:00','04:00')`, [C, u(C, 107), IDS.C.loc]);
-    await q(`insert into policies (tenant_id, id, version, body) values ($1,$2,1,$3)`, [C, u(C, 40), JSON.stringify({ ...policy, lead_min: 0 })]);
+    await q(`insert into policies (tenant_id, id, version, body) values ($1,$2,1,$3)`, [C, u(C, 40), JSON.stringify({ ...policy, lead_min: 0, recording: true })]);
     await q(`insert into owner_identities (tenant_id, id, label, channel, value, value_hash, priority, verified_at) values ($1,$2,'owner C','sms',$3,$4,1,$5)`,
       [C, IDS.C.ownerSms, NUM.C.ownerSms, idHash(NUM.C.ownerSms), now]);
     await q(`insert into owner_routes values ('sms',$1,$2)`, [idHash(NUM.C.ownerSms), C]);

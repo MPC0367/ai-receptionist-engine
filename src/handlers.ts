@@ -3,6 +3,7 @@ import type { Tx } from './db.ts';
 import { runDue, schedule, type Handler } from './jobs.ts';
 import { isOptedOut, sandboxSend } from './messaging/channels.ts';
 import { onKcExpire, onSendResult, onTimer } from './escalation/pq.ts';
+import { mirror, type CalendarApi } from './connectors/calendar.ts';
 
 const MAX_SEND_ATTEMPTS = 4;
 const SEND_BACKOFF_MS = [60_000, 300_000, 1_200_000];
@@ -33,6 +34,9 @@ const outbox: Handler = async (tx: Tx, job, now) => {
   }
 };
 
+let calendarApi: CalendarApi | null = null;
+export function useCalendarApi(api: CalendarApi | null) { calendarApi = api; }
+
 const pqTimer = (kind: string): Handler => (tx, job, now) => onTimer(tx, job.tenant_id, kind, job.ref, now);
 
 export const HANDLERS: Record<string, Handler> = {
@@ -43,6 +47,8 @@ export const HANDLERS: Record<string, Handler> = {
   pq_owner_retry: pqTimer('pq_owner_retry'),
   pq_relay: pqTimer('pq_relay'),
   kc_expire: (tx, job, now) => onKcExpire(tx, job.tenant_id, job.ref, now),
+  // Failures throw: the job runner retries with backoff and marks the job failed after 5 attempts (AT-43).
+  calendar_mirror: async (tx, job, now) => { if (calendarApi) await mirror(tx, job.tenant_id, calendarApi, job.ref, now); },
 };
 
 /** Run jobs until nothing more is due at `now` (sends can enqueue further sends). */

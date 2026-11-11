@@ -13,6 +13,7 @@ import { addDays, isoWeekday, localParts } from '../time/zone.ts';
 import { businessFacts } from '../knowledge.ts';
 import { enqueue, isOptedOut, optOutFooter, recordConsent } from '../messaging/channels.ts';
 import { createPendingQuestion, OWNER_LINE_SENDER } from '../escalation/pq.ts';
+import { calendarReady } from '../connectors/calendar.ts';
 import { safetyGate, cleanSummary } from '../escalation/safety.ts';
 
 /** Runtime-supplied facts the model never controls (turn order, spoken text hashes, versions it read earlier). */
@@ -40,6 +41,7 @@ const SCHEMAS: Record<string, Schema> = {
     reply_target: { type: 'object', properties: { kind: { type: 'string', enum: ['ani', 'other_number'] }, number: { type: 'string', maxLength: 20 } }, required: ['kind'] },
     caller_preferred_name: { type: 'string', maxLength: 60 }, context_line: { type: 'string', maxLength: 160 }, variant_ref: { type: 'string', maxLength: 80 } },
     ['question_text', 'summary_source', 'reply_target']),
+  log_booking_request: S({ variant_ref: { type: 'string', maxLength: 80 }, date_phrase: { type: 'string', maxLength: 80 }, client_name: { type: 'string', maxLength: 80 } }, ['variant_ref', 'date_phrase']),
   request_human_transfer: S({ reason: { type: 'string', enum: ['caller_asked', 'unknown_question', 'sensitive', 'frustration', 'tool_failure'] }, topic: { type: 'string', maxLength: 80 } }, ['reason', 'topic']),
 };
 export const TOOLS = Object.keys(SCHEMAS);
@@ -117,11 +119,22 @@ export async function callTool(token: string, tool: string, args: unknown, meta:
     if (!SCHEMAS[tool]) throw new ToolError('VALIDATION_FAILED', `unknown tool ${tool}`);
     validate(args, SCHEMAS[tool]);
     const c = claims, a = args as Record<string, any>;
-    const data = await withTenant(c.tenant_id, async tx => {
-      const conv = (await tx.query(`select status from conversations where id = $1`, [c.conversation_id])).rows[0];
-      if (!conv || conv.status === 'closed') throw new ToolError('AUTH_EXPIRED', 'conversation closed');
-      return dispatch(tx, c, tool, a, meta, now);
-    });
+    // Deadlock (40P01) and serialisation (40001) failures roll the whole transaction back; every write is
+    // idempotent, so retrying the tool is safe.
+    let data: unknown;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        data = await withTenant(c.tenant_id, async tx => {
+          const conv = (await tx.query(`select status from conversations where id = $1`, [c.conversation_id])).rows[0];
+          if (!conv || conv.status === 'closed') throw new ToolError('AUTH_EXPIRED', 'conversation closed');
+          return dispatch(tx, c, tool, a, meta, now);
+        });
+        break;
+      } catch (e: any) {
+        if (attempt < 2 && (e?.code === '40P01' || e?.code === '40001')) continue;
+        throw e;
+      }
+    }
     result = { ok: true, data };
   } catch (e) {
     if (e instanceof ToolError) result = e.toResult();
@@ -156,8 +169,12 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
       const loc = await B.location(tx), pol = (await B.policy(tx)).body, v = await resolveVariant(tx, a.variant_ref);
       const staffRow = a.staff_ref ? (await tx.query(`select id from resources where kind = 'staff' and (id::text = $1 or lower(display_name) = lower($1))`, [a.staff_ref])).rows[0] : undefined;
       if (a.staff_ref && !staffRow) throw new ToolError('NOT_FOUND', 'staff', 'need_more_detail');
-      const staff = await B.qualifiedStaff(tx, v.id, staffRow?.id);
-      if (!staff.length) throw new ToolError('POLICY_BLOCKED', 'no qualified staff', 'not_allowed_by_policy');
+      const qualified = await B.qualifiedStaff(tx, v.id, staffRow?.id);
+      if (!qualified.length) throw new ToolError('POLICY_BLOCKED', 'no qualified staff', 'not_allowed_by_policy');
+      // A staff member whose calendar is disconnected or stale may be busy: never offer them (SM-10, AT-35).
+      const staff = [];
+      for (const st of qualified) if (await calendarReady(tx, st.id, now)) staff.push(st);
+      if (!staff.length) throw new ToolError('CONNECTOR_UNAVAILABLE', 'calendar not available', 'system_trouble');
       const weekly = (await tx.query(`select weekday, opens::text o, closes::text c from business_hours where resource_id is null`)).rows;
       const toT = (x: string) => ({ h: +x.slice(0, 2), mi: +x.slice(3, 5) });
       const hoursOn = (d: { y: number; m: number; d: number }) => weekly.filter(w => w.weekday === isoWeekday(d)).map(w => ({ from: toT(w.o), to: toT(w.c) }));
@@ -250,6 +267,19 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
         createPendingQuestion(tx, c.tenant_id, { conversationId: c.conversation_id, questionText: q, summarySource: a.summary_source, tier: gate.tier as 'N' | 'S',
           category: gate.category, callerName: a.caller_preferred_name, target, ani: c.ani ? normalisePhone(c.ani, c.jurisdiction) : null, consentId: consent.id, lang: c.lang, contextLine: a.context_line,
           linkedVariantId: variantId, now }));
+    }
+
+    case 'log_booking_request': {
+      // SM-3 request_fallback: a request for staff to confirm, never a booking. The caller is told so in [CODE].
+      const id = uuid();
+      await tx.query(`insert into staff_tasks (tenant_id, id, kind, ref, detail, created_at) values ($1,$2,'booking_request',$3,$4,$5)`,
+        [c.tenant_id, id, c.conversation_id, JSON.stringify({ variant: a.variant_ref, when: a.date_phrase, name: a.client_name ?? null, phone: c.ani }), now]);
+      const owner = (await tx.query(`select channel, value from owner_identities order by priority limit 1`)).rows[0];
+      if (owner) await enqueue(tx, c.tenant_id, { kind: owner.channel, key: `booking_request:${id}`, to: owner.value, exempt: true, now,
+        sender: owner.channel === 'line' ? OWNER_LINE_SENDER : (await smsSenderOf(tx, c.tenant_id))!.sender,
+        body: `คำขอจอง (ยังไม่ใช่การจอง): ${a.variant_ref} · ${a.date_phrase} · ลูกค้า …${(c.ani ?? '').slice(-4)} — โทรกลับเพื่อยืนยัน / Booking request, not a booking: call back to confirm` });
+      return { request_ref: id, speakable: c.lang === 'th' ? 'ตอนนี้ดิฉันยืนยันการจองไม่ได้ค่ะ ส่งคำขอให้ทีมงานแล้ว นี่ยังไม่ใช่การจองนะคะ ทีมงานจะติดต่อกลับเพื่อยืนยันค่ะ'
+        : "I can't confirm bookings right now. I've passed your request to the team; this is not a confirmed booking yet. They'll contact you to confirm." };
     }
 
     case 'request_human_transfer': {
