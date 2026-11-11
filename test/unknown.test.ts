@@ -309,3 +309,14 @@ test('AT-32 a prior STOP blocks the text path even if the caller says yes on the
   assert.equal(again.u.outcome, 'caller_declined_followup');
   assert.equal((again.u as any).error.code, 'CONSENT_REQUIRED');
 });
+
+test('the emergency rules run on every caller turn: an emergency in the middle of a booking interrupts it', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const s = await call.tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+  assert.ok(s.ok);
+  const e = await call.listen('เดี๋ยวนะ แม่หายใจไม่ออก');
+  assert.deepEqual(e, { emergency: true, spokenNumber: '1669' });
+  assert.equal(await call.listen('ขอเวลาบ่ายสามค่ะ'), null);
+  assert.equal(await withTenant(A, async tx => Number((await tx.query('select count(*) n from pending_questions')).rows[0].n)), 0);
+});

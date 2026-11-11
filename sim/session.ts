@@ -8,7 +8,7 @@ import { idHash, uuid, withSystem, withTenant } from '../src/db.ts';
 import { callTool, type Meta, type ToolResult } from '../src/tools/gateway.ts';
 import { mintCallToken } from '../src/tools/token.ts';
 import { grounded } from '../src/knowledge.ts';
-import { safetyGate, cleanSummary } from '../src/escalation/safety.ts';
+import { safetyGate, cleanSummary, isEmergency } from '../src/escalation/safety.ts';
 import { closeConversation } from '../src/metering.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -49,6 +49,17 @@ export class Call {
     });
     call.say(T.greeting(name, call.lang));
     return { call, unrouted: false };
+  }
+
+  /** Every caller turn passes the emergency rules first (UQ1 tier E applies anywhere in the call, SM-2). */
+  async listen(text: string): Promise<{ emergency: true; spokenNumber: string } | null> {
+    this.hear(text);
+    if (!isEmergency(text)) return null;
+    const country = await withTenant(this.tenantId, async tx => (await tx.query('select country from tenants')).rows[0].country);
+    const n = await withSystem(async s => (await s.query(`select number, label_th, label_en from jurisdiction_contacts where country = $1 order by kind limit 1`, [country])).rows[0]);
+    this.say(this.lang === 'th' ? `หากเป็นเหตุฉุกเฉิน กรุณาโทร ${n.label_th} ทันทีค่ะ` : `If this is an emergency, please call ${n.label_en} now.`);
+    this.outcomes.push('unsafe_refused/emergency');
+    return { emergency: true, spokenNumber: n.number };
   }
 
   say(text: string) { const seq = this.turns.length; this.turns.push({ seq, who: 'ai', text }); return seq; }

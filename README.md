@@ -9,7 +9,7 @@ first with LINE as the owner channel, massage / day spa, LiveKit Agents as the f
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 42 tests (resets the rcpt_test database per test)
+npm test              # 43 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```

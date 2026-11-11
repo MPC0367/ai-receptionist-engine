@@ -14,6 +14,9 @@ const CREDENTIAL = /password|passcode|\botp\b|รหัสผ่าน|รหั
 const CHILD = /(child|kid|son|daughter) (is |aged? )?([1-9]|1[0-2])( years?)?\b|เด็กอายุ\s?([1-9]|1[0-2])\s?(ขวบ|ปี)/i;
 const SENSITIVE = /pregnan|injur|surgery|operation|condition|allerg|diabet|blood pressure|complain|refund|dispute|\brude\b|ตั้งครรภ์|ตั้งท้อง|คนท้อง|บาดเจ็บ|ผ่าตัด|แพ้|เบาหวาน|ความดัน|ร้องเรียน|คืนเงิน|ไม่พอใจ/i;
 
+/** Tier-E rules alone, synchronous: the runtime runs this on every caller turn, not only on unanswered questions. */
+export const isEmergency = (text: string) => EMERGENCY.test(text);
+
 export function luhn(digits: string): boolean {
   let sum = 0, alt = false;
   for (let i = digits.length - 1; i >= 0; i--) {
