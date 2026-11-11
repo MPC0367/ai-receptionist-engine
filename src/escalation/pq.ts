@@ -24,7 +24,7 @@ const OPEN = ['queued', 'owner_notifying', 'owner_unreachable', 'awaiting_owner'
 const ALLOWED: Record<string, string[]> = {
   queued: ['owner_notifying', 'expired'],
   owner_notifying: ['awaiting_owner', 'owner_notifying', 'owner_unreachable', 'expired', 'owner_declined', 'reply_needs_edit', 'owner_confirming'],
-  owner_unreachable: ['owner_notifying', 'expired'],
+  owner_unreachable: ['owner_notifying', 'expired', 'reply_needs_edit', 'owner_confirming', 'owner_declined'],
   awaiting_owner: ['reply_needs_edit', 'owner_confirming', 'owner_declined', 'expired'],
   reply_needs_edit: ['reply_needs_edit', 'owner_confirming', 'owner_declined', 'owner_reply_rejected'],
   owner_confirming: ['relaying', 'awaiting_owner', 'owner_confirming', 'owner_declined', 'expired', 'reply_needs_edit'],
@@ -139,7 +139,8 @@ async function sendTargetConfirmation(tx: Tx, tenantId: string, pq: PQ, now: Dat
   const body = pq.lang === 'th'
     ? `${l.name}: มีผู้ขอให้ส่งคำตอบคำถามมาที่เบอร์นี้ ${tail} (ไม่ได้ขอ? ไม่ต้องทำอะไร)`
     : `${l.name}: someone asked us to text an answer to this number. ${tail} (Didn't ask? Ignore this.)`;
-  await enqueue(tx, tenantId, { kind: 'sms', key: `pq:${pq.id}:confirm_target`, to: pq.target, sender: s.sender, body, now, meta: { pq_id: pq.id, purpose: 'pq_confirm_target' } });
+  await enqueue(tx, tenantId, { kind: 'sms', key: `pq:${pq.id}:confirm_target`, to: pq.target, sender: s.sender, body, now, runAt: quietHoursWait(now, l.time_zone) ?? undefined,
+    meta: { pq_id: pq.id, purpose: 'pq_confirm_target' } });
 }
 
 // ---- PQ2: notify the owner (minimum necessary, §5.8.4) ----------------------------------------------------
@@ -165,14 +166,14 @@ export async function notifyOwner(tx: Tx, tenantId: string, pq: PQ, now: Date) {
     `\nตอบได้ถึง / Answer by: ${localStr(new Date(pq.expires_at), l.time_zone, 'th')}`;
   if (who.channel === 'line') {
     body += '\nตอบ: กดค้าง (quote) ข้อความนี้แล้วพิมพ์คำตอบ / Reply by quoting this message';
-    await enqueue(tx, tenantId, { kind: 'line', key: `pq:${pq.id}:notify:${who.id}:${pq.owner_attempt}`, to: who.value, sender: OWNER_LINE_SENDER, body, now,
+    await enqueue(tx, tenantId, { kind: 'line', key: `pq:${pq.id}:notify:${pq.notify_round}:${who.id}:${pq.owner_attempt}`, to: who.value, sender: OWNER_LINE_SENDER, body, now,
       quickReplies: [{ label: 'ฉันจะติดต่อเอง', data: postback(tenantId, pq.id, 'will_contact') }, { label: 'ตอบไม่ได้', data: postback(tenantId, pq.id, 'decline') }],
       meta: { pq_id: pq.id, purpose: 'pq_notify', identity_id: who.id } });
   } else {
     const s = await smsSender(tx, tenantId);
     const how = s.two_way ? `Reply with the answer, or text DECLINE ${pq.handle} / CALL ${pq.handle}`
       : `ตอบที่ / Answer at: ${(await makeLink(tx, tenantId, 'owner_reply', pq.id, new Date(pq.late_until))).url}`;
-    await enqueue(tx, tenantId, { kind: 'sms', key: `pq:${pq.id}:notify:${who.id}:${pq.owner_attempt}`, to: who.value, sender: s.sender, body: `${body}\n${how}`, now, exempt: true,
+    await enqueue(tx, tenantId, { kind: 'sms', key: `pq:${pq.id}:notify:${pq.notify_round}:${who.id}:${pq.owner_attempt}`, to: who.value, sender: s.sender, body: `${body}\n${how}`, now, exempt: true,
       meta: { pq_id: pq.id, purpose: 'pq_notify', identity_id: who.id } });
   }
 }
@@ -186,7 +187,7 @@ async function ownerMessage(tx: Tx, tenantId: string, pq: PQ, key: string, body:
 }
 
 // ---- Outbox results feed the machine ----------------------------------------------------------------------
-export async function onSendResult(tx: Tx, tenantId: string, meta: Record<string, any>, ok: boolean, permanent: boolean, providerMessageId: string | null, now: Date) {
+export async function onSendResult(tx: Tx, tenantId: string, meta: Record<string, any>, ok: boolean, permanent: boolean, providerMessageId: string | null, now: Date, reason?: string) {
   if (!meta.pq_id) return;
   const pq = await loadPq(tx, meta.pq_id);
   if (meta.purpose === 'pq_notify') {
@@ -204,6 +205,9 @@ export async function onSendResult(tx: Tx, tenantId: string, meta: Record<string
       await ownerMessage(tx, tenantId, pq, 'receipt', `ส่งคำตอบ ${pq.handle} ถึงลูกค้า (…${pq.target_last4}) แล้ว เวลา ${pad(lp.h)}:${pad(lp.mi)} / Delivered`, now, [
         { label: 'ไม่ใช่ฉันส่ง / That wasn\'t me', data: postback(tenantId, pq.id, 'not_me') }]);
       await offerKnowledge(tx, tenantId, pq, now);
+    } else if (permanent && reason === 'opted_out') {
+      await move(tx, tenantId, pq, 'caller_unreachable', 'opted_out', 'caller', now, { outcome_reason: 'opted_out' });
+      await ownerMessage(tx, tenantId, pq, 'unreachable', `ส่งคำตอบ ${pq.handle} ไม่ได้: ลูกค้ายกเลิกรับข้อความ / Caller opted out of texts`, now);
     } else if (permanent) {
       await move(tx, tenantId, pq, 'caller_unreachable', 'delivery_failed', 'provider', now, { outcome_reason: 'undeliverable' });
       await ownerMessage(tx, tenantId, pq, 'undeliverable', `ส่งคำตอบ ${pq.handle} ไม่ถึงลูกค้า (…${pq.target_last4}) — โทรกลับได้จากแดชบอร์ด / Couldn't deliver; call back from the dashboard`, now);
@@ -211,20 +215,39 @@ export async function onSendResult(tx: Tx, tenantId: string, meta: Record<string
   }
 }
 
-// ---- PQ3/PQ4: owner replies ---------------------------------------------------------------------------------
-export type OwnerEvent = { channel: 'line' | 'sms' | 'web'; identityId: string; providerMessageId: string; text?: string; quotedMessageId?: string; postback?: Record<string, string>; pqId?: string };
+/** A STOP (keyword or link) closes any answer still on its way to that number. */
+export async function onCallerOptOut(tx: Tx, tenantId: string, target: string, now: Date) {
+  const rows = (await tx.query(`select id from pending_questions where target_hash = $1 and status in ('relaying','awaiting_target')`, [idHash(target)])).rows;
+  for (const r of rows) {
+    const pq = await loadPq(tx, r.id);
+    await move(tx, tenantId, pq, 'caller_unreachable', 'opted_out', 'caller', now, { outcome_reason: 'opted_out' });
+    await ownerMessage(tx, tenantId, pq, 'unreachable', `ส่งคำตอบ ${pq.handle} ไม่ได้: ลูกค้ายกเลิกรับข้อความ / Caller opted out of texts`, now);
+  }
+}
 
-async function findPqForOwnerText(tx: Tx, ev: OwnerEvent, now: Date): Promise<PQ | 'ambiguous' | null> {
+// ---- PQ3/PQ4: owner replies ---------------------------------------------------------------------------------
+export type OwnerEvent = { channel: 'line' | 'sms' | 'web'; identityId: string; providerMessageId: string; text?: string; quotedMessageId?: string;
+  postback?: Record<string, string>; pqId?: string; allowFallback?: boolean };
+
+/** "Q-7K3F: answer…" names the question explicitly (how an SMS owner answers when several are open). */
+function handlePrefix(text: string | undefined): { handle: string; rest: string } | null {
+  const m = (text ?? '').match(/^\s*(Q-[A-Z0-9]{4})\b[\s:\-–]*([\s\S]*)$/i);
+  return m && m[2].trim() && !ownerCommand(text ?? '') ? { handle: m[1].toUpperCase(), rest: m[2].trim() } : null;
+}
+
+async function findPqForOwnerText(tx: Tx, ev: OwnerEvent, now: Date): Promise<PQ | 'ambiguous' | 'not_here' | null> {
   if (ev.pqId) return loadPq(tx, ev.pqId);
+  // An explicit reference that does not resolve in this tenant is never redirected to another question.
   if (ev.quotedMessageId) {
     const r = await tx.query(`select payload->'meta'->>'pq_id' pq from outbox_events where provider_message_id = $1`, [ev.quotedMessageId]);
-    if (r.rowCount && r.rows[0].pq) return loadPq(tx, r.rows[0].pq);
+    return r.rowCount && r.rows[0].pq ? loadPq(tx, r.rows[0].pq) : 'not_here';
   }
-  const cmd = ev.text ? ownerCommand(ev.text) : null;
-  if (cmd?.handle) {
-    const r = await tx.query('select id from pending_questions where handle = $1', [cmd.handle]);
-    if (r.rowCount) return loadPq(tx, r.rows[0].id);
+  const handle = (ev.text ? ownerCommand(ev.text)?.handle : undefined) ?? handlePrefix(ev.text)?.handle;
+  if (handle) {
+    const r = await tx.query('select id from pending_questions where handle = $1', [handle]);
+    return r.rowCount ? loadPq(tx, r.rows[0].id) : 'not_here';
   }
+  if (ev.allowFallback === false) return 'ambiguous';
   const open = await tx.query(`select id from pending_questions where status = any($1) order by created_at`, [[...OPEN, 'expired', 'late_confirming']]);
   const live = [];
   for (const row of open.rows) {
@@ -239,12 +262,14 @@ export async function handleOwnerEvent(tx: Tx, tenantId: string, ev: OwnerEvent,
   if (ev.postback) return ownerAction(tx, tenantId, ev.postback.p, ev.postback.a, now, ev.postback);
   const found = await findPqForOwnerText(tx, ev, now);
   if (found === null) return { handled: false, reason: 'no_open_question' };
+  if (found === 'not_here') return { handled: false, reason: 'not_here' };
   if (found === 'ambiguous') {
-    await enqueue(tx, tenantId, { kind: 'line', key: `owner:ask_quote:${ev.providerMessageId}`, to: await identityValue(tx, ev.identityId), sender: OWNER_LINE_SENDER, exempt: true, now,
-      body: 'มีคำถามค้างอยู่หลายข้อ กรุณากด quote ที่ข้อความคำถามที่ต้องการตอบ / Several questions are open: please quote the one you are answering' });
+    await askToName(tx, tenantId, ev, now);
     return { handled: false, reason: 'ambiguous' };
   }
   const pq = found;
+  const prefixed = handlePrefix(ev.text);
+  if (prefixed) ev = { ...ev, text: prefixed.rest };
   const cmd = ownerCommand(ev.text ?? '');
   if (cmd?.cmd === 'send') return ownerAction(tx, tenantId, pq.id, pq.status === 'late_confirming' ? 'late_send' : 'send', now, { r: pq.pending_reply_id });
   if (cmd) return ownerAction(tx, tenantId, pq.id, cmd.cmd, now);
@@ -288,8 +313,15 @@ export async function handleOwnerEvent(tx: Tx, tenantId: string, ev: OwnerEvent,
   return { handled: true, status: pq.status, confirm: check.confirm };
 }
 
-async function identityValue(tx: Tx, id: string) {
-  return (await tx.query('select value from owner_identities where id = $1', [id])).rows[0]?.value as string;
+/** Ask the owner to say which question they are answering, on the channel they used. */
+export async function askToName(tx: Tx, tenantId: string, ev: { identityId: string; providerMessageId: string }, now: Date) {
+  const who = (await tx.query('select channel, value from owner_identities where id = $1', [ev.identityId])).rows[0];
+  if (!who) return;
+  const line = who.channel === 'line';
+  await enqueue(tx, tenantId, { kind: who.channel, key: `owner:ask_quote:${ev.providerMessageId}`, to: who.value, exempt: true, now,
+    sender: line ? OWNER_LINE_SENDER : (await smsSender(tx, tenantId)).sender,
+    body: line ? 'มีคำถามค้างอยู่หลายข้อ กรุณากด quote ที่ข้อความคำถามที่ต้องการตอบ / Several questions are open: please quote the one you are answering'
+      : 'Several questions are open: start your answer with its code, e.g. "Q-7K3F: your answer"' });
 }
 
 export async function ownerAction(tx: Tx, tenantId: string, pqId: string, action: string, now: Date, pb: Record<string, string> = {}) {
@@ -383,7 +415,8 @@ async function callerText(tx: Tx, tenantId: string, pq: PQ, kind: 'will_contact'
     expired: `${l.name}: ขออภัย ทีมงานยังตอบคำถามเรื่อง “${shortQ(pq.question_text)}” ไม่ได้ กรุณาโทร ${l.public_phone}` };
   const en = { will_contact: `${l.name} will contact you directly about your question.`, cannot_answer: `${l.name}: we can't answer that by text. Please call us at ${l.public_phone}.`,
     expired: `${l.name}: we weren't able to get you an answer about “${shortQ(pq.question_text)}” yet. Please call us at ${l.public_phone}.` };
-  await enqueue(tx, tenantId, { kind: 'sms', key: `pq:${pq.id}:caller:${kind}`, to: pq.target, sender: s.sender, body: (pq.lang === 'th' ? th : en)[kind] + footer, now, meta: { pq_id: pq.id, purpose: `pq_${kind}` } });
+  await enqueue(tx, tenantId, { kind: 'sms', key: `pq:${pq.id}:caller:${kind}`, to: pq.target, sender: s.sender, body: (pq.lang === 'th' ? th : en)[kind] + footer, now,
+    runAt: quietHoursWait(now, l.time_zone) ?? undefined, meta: { pq_id: pq.id, purpose: `pq_${kind}` } });
 }
 
 /** Recipient confirmed a non-ANI reply number (YES on a two-way sender, or the confirmation link). */
@@ -404,8 +437,9 @@ export async function onTimer(tx: Tx, tenantId: string, kind: string, pqId: stri
     await tx.query('update pending_questions set reminders_sent = reminders_sent + 1 where id = $1', [pq.id]);
     await ownerMessage(tx, tenantId, pq, `reminder:${pq.reminders_sent}`, `เตือน: คำถาม ${pq.handle} ยังไม่ได้ตอบ “${shortQ(pq.question_text)}” / Reminder`, now, undefined, 'pq_reminder');
   } else if (kind === 'pq_owner_retry' && pq.status === 'owner_unreachable') {
-    await tx.query('update pending_questions set owner_attempt = 0 where id = $1', [pq.id]);
+    await tx.query('update pending_questions set owner_attempt = 0, notify_round = notify_round + 1 where id = $1', [pq.id]);
     pq.owner_attempt = 0;
+    pq.notify_round += 1;
     await notifyOwner(tx, tenantId, pq, now);
   } else if (kind === 'pq_expire' && OPEN.includes(pq.status)) {
     // Only rejected replies arrived → owner_reply_rejected; otherwise owner timeout. Either way the caller is told the truth.

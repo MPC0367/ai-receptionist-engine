@@ -110,8 +110,13 @@ test('AT-13 cancellation states the policy consequence from the record, never a 
   assert.ok(ask.ok && ask.data.needs_confirmation);
   assert.equal(ask.data.policy_consequence_text.th, 'ยกเลิกน้อยกว่า 24 ชั่วโมงก่อนนัด ทางร้านขอสงวนสิทธิ์เก็บมัดจำค่ะ');
   assert.ok(!/refund|คืนเงิน/i.test(JSON.stringify(ask.data)));
+  const wrong = await call2.tool('cancel_booking', { booking_ref: b.data.bookings[0].booking_ref, confirmed: true },
+    { expected_version: 1, spoken_confirmation_sha256: sha('something else'), spoken_turn: 30, confirm_turn: 31 });
+  assert.equal(!wrong.ok && wrong.error.code, 'VALIDATION_FAILED', 'the cancellation sentence (with its fee) must be the one spoken');
+  const rc = ask.data.rendered_confirmation;
+  assert.match(rc.th, /ขอยืนยันการยกเลิก: นวดไทย 60 นาที วันศุกร์ที่ 13 พฤศจิกายน 2569 เวลา 15:00 น\. .*เก็บมัดจำ/);
   const done = await call2.tool('cancel_booking', { booking_ref: b.data.bookings[0].booking_ref, confirmed: true },
-    { expected_version: 1, spoken_confirmation_sha256: 'x', spoken_turn: 30, confirm_turn: 31 });
+    { expected_version: 1, spoken_confirmation_sha256: sha(rc.th + '\n' + rc.en), spoken_turn: 30, confirm_turn: 31 });
   assert.ok(done.ok);
   assert.equal(await count(A, `select count(*) n from slot_claims where status = 'active'`), 0);
 });

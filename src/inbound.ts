@@ -4,7 +4,7 @@
  */
 import { audit, idHash, sha256, withSystem, withTenant } from './db.ts';
 import { applyOptKeyword, enqueue, firstReceipt, keyword, verifyLine, verifySms } from './messaging/channels.ts';
-import { confirmTarget, handleOwnerEvent, ownerAction, readPostback } from './escalation/pq.ts';
+import { askToName, confirmTarget, handleOwnerEvent, onCallerOptOut, ownerAction, readPostback } from './escalation/pq.ts';
 
 export const LINE_CHANNEL_SECRET = process.env.RCPT_LINE_SECRET ?? 'sandbox-line-channel-secret';
 export const SMS_WEBHOOK_SECRET = process.env.RCPT_SMS_SECRET ?? 'sandbox-sms-webhook-secret';
@@ -38,16 +38,36 @@ export async function lineWebhook(rawBody: string, signature: string | undefined
       results.push({ rejected: 'unenrolled' });
       continue;
     }
-    for (const tenantId of pb ? [pb.t] : tenants) {
-      results.push(await withTenant(tenantId, async tx => {
-        const who = (await tx.query(`select id from owner_identities where channel = 'line' and value_hash = $1`, [idHash(ev.source.userId)])).rows[0];
-        if (!who) return { rejected: 'not_owner_here' };
-        return handleOwnerEvent(tx, tenantId, { channel: 'line', identityId: who.id, providerMessageId: ev.message?.id ?? ev.webhookEventId,
-          text: ev.message?.text, quotedMessageId: ev.message?.quotedMessageId, postback: pb ?? undefined }, now);
-      }));
+    // An owner of several businesses: free text is only ever matched by an explicit reference (quote or handle),
+    // never by "the only open question" in each business (review finding 1).
+    const multi = !pb && tenants.length > 1;
+    try {
+      const out: any[] = [];
+      for (const tenantId of pb ? [pb.t] : tenants) {
+        out.push(await withTenant(tenantId, async tx => {
+          const who = (await tx.query(`select id from owner_identities where channel = 'line' and value_hash = $1`, [idHash(ev.source.userId)])).rows[0];
+          if (!who) return { rejected: 'not_owner_here' };
+          return handleOwnerEvent(tx, tenantId, { channel: 'line', identityId: who.id, providerMessageId: ev.message?.id ?? ev.webhookEventId,
+            text: ev.message?.text, quotedMessageId: ev.message?.quotedMessageId, postback: pb ?? undefined, allowFallback: !multi }, now);
+        }));
+      }
+      if (multi && !out.some(r => r?.handled)) {
+        await withTenant(tenants[0], async tx => {
+          const who = (await tx.query(`select id from owner_identities where channel = 'line' and value_hash = $1`, [idHash(ev.source.userId)])).rows[0];
+          if (who) await askToName(tx, tenants[0], { identityId: who.id, providerMessageId: ev.message?.id ?? ev.webhookEventId }, now);
+        });
+      }
+      results.push(...(multi ? [out.find(r => r?.handled) ?? { handled: false, reason: 'ambiguous' }] : out));
+    } catch (e: any) {
+      // Give the receipt back so the provider's redelivery is processed, and record the failure (review finding 5).
+      await withSystem(async tx => {
+        await tx.query(`delete from webhook_receipts where provider = 'line' and receipt_key = $1`, [ev.webhookEventId]);
+        await audit(tx, null, { machine: 'edge', entity: 'line', event: 'processing_failed', actor: 'system', detail: { error: String(e?.message ?? e).slice(0, 200) }, at: now });
+      });
+      results.push({ error: 'processing_failed' });
     }
   }
-  return { status: 200, results };
+  return { status: results.some((r: any) => r?.error) ? 500 : 200, results };
 }
 
 /** Generic two-way SMS stand-in. Real adapters (Twilio, Telnyx, a Thai gateway) verify their own signature schemes. */
@@ -66,6 +86,7 @@ export async function smsWebhook(rawBody: string, ts: number, signature: string 
     const kw = keyword(m.body);
     if (kw === 'stop' || kw === 'start') {
       await applyOptKeyword(tx, route.tenant_id, { sender: m.to, target: m.from, channel: 'sms', kw, sourceMessageId: m.message_id, now, twoWay: route.two_way, lang: /[฀-๿]/.test(m.body) ? 'th' : 'en' });
+      if (kw === 'stop') await onCallerOptOut(tx, route.tenant_id, m.from, now);
       return { status: 200, keyword: kw };
     }
     if (kw === 'help') {
@@ -87,18 +108,27 @@ export async function smsWebhook(rawBody: string, ts: number, signature: string 
 }
 
 /** One-time links (Thai one-way SMS): confirm a reply number, opt out, or open the owner reply page. */
-export async function linkHit(token: string, now: Date, ownerText?: string, pressSend = false) {
+/**
+ * Opening a link (GET) only shows a page: link previews and carrier scanners open SMS links automatically, so a
+ * confirmation or an opt-out happens only when the person presses the page's button (`press`).
+ */
+export async function linkHit(token: string, now: Date, ownerText?: string, press = false) {
   const row = await withSystem(async tx => (await tx.query(`select * from link_tokens where token_hash = $1 for update`, [sha256(token)])).rows[0]);
   if (!row || row.expires_at < now) return { status: 410 };
   if (row.kind === 'confirm_target') {
+    if (!press) return { status: 200, page: 'confirm_target' };
+    if (row.used_at) return { status: 200, already: true };
+    await withSystem(tx => tx.query(`update link_tokens set used_at = $2 where token_hash = $1`, [sha256(token), now]));
     return withTenant(row.tenant_id, tx => confirmTarget(tx, row.tenant_id, row.ref, now));
   }
   if (row.kind === 'opt_out') {
+    if (!press) return { status: 200, page: 'opt_out' };
     if (row.used_at) return { status: 200, already: true };
     await withSystem(tx => tx.query(`update link_tokens set used_at = $2 where token_hash = $1`, [sha256(token), now]));
     return withTenant(row.tenant_id, async tx => {
       const s = (await tx.query(`select sender, two_way from senders where tenant_id = $1 and channel = 'sms'`, [row.tenant_id])).rows[0];
       await applyOptKeyword(tx, row.tenant_id, { sender: s.sender, target: row.ref, channel: 'sms', kw: 'stop', sourceMessageId: `link:${sha256(token).toString('hex').slice(0, 16)}`, now, twoWay: s.two_way, lang: 'th' });
+      await onCallerOptOut(tx, row.tenant_id, row.ref, now);
       return { status: 200, opted_out: true };
     });
   }
@@ -109,7 +139,7 @@ export async function linkHit(token: string, now: Date, ownerText?: string, pres
     const r: any = await handleOwnerEvent(tx, row.tenant_id, { channel: 'web', identityId: owner.id, providerMessageId: `web:${now.getTime()}`, text: ownerText,
       quotedMessageId: undefined, pqId: row.ref }, now);
     // The web page is itself the preview: its Send button is the owner's explicit confirmation.
-    if (pressSend && r.status === 'owner_confirming') {
+    if (press && r.status === 'owner_confirming') {
       const pq = (await tx.query('select pending_reply_id from pending_questions where id = $1', [row.ref])).rows[0];
       return ownerAction(tx, row.tenant_id, row.ref, 'send', now, { r: pq.pending_reply_id });
     }

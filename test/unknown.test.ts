@@ -164,7 +164,9 @@ test('AT-23 a different reply number must confirm (Thai: one-time link); never c
   const r2 = await askParking(clock2, { target: { kind: 'other_number', number: other } });
   await drain(clock2.now());
   const token = (await callerTexts('+66898765432'))[0].body.match(/\/c\/([A-Za-z0-9_-]+)/)![1];
-  await linkHit(token, clock2.now());
+  assert.deepEqual(await linkHit(token, clock2.now()), { status: 200, page: 'confirm_target' }, 'opening the link (a preview, a scanner) confirms nothing');
+  assert.equal((await pqRow(A, r2.u.pq.pq_handle)).target_confirmed_at, null);
+  await linkHit(token, clock2.now(), undefined, true);
   const n2 = await notifyMsg(r2.u.pq.pq_handle);
   await ownerLine(clock2.now(), NUM.A.ownerLine, { text: 'มีที่จอดฟรีค่ะ', quotedMessageId: n2.provider_message_id });
   await drain(clock2.now());
@@ -270,7 +272,7 @@ test('caller STOPs (opt-out link) after the call → the owner answer is not sen
   await call.book({ service: 'นวดไทย 60', when: 'พรุ่งนี้บ่ายสาม', name: 'อันนา', textConfirmation: true });
   await drain(clock.now());
   const optOut = (await callerTexts())[0].body.match(/\/o\/([A-Za-z0-9_-]+)/)![1];
-  await linkHit(optOut, clock.now());
+  await linkHit(optOut, clock.now(), undefined, true);
   await drain(clock.now());
   const n = await notifyMsg(u.pq.pq_handle);
   await ownerLine(clock.now(), NUM.A.ownerLine, { text: 'มีที่จอดฟรีค่ะ', quotedMessageId: n.provider_message_id });
@@ -304,7 +306,7 @@ test('AT-32 a prior STOP blocks the text path even if the caller says yes on the
   const first = await askParking(clock);
   await first.call.book({ service: 'นวดไทย 60', when: 'พรุ่งนี้บ่ายสาม', name: 'อันนา', textConfirmation: true });
   await drain(clock.now());
-  await linkHit((await callerTexts())[0].body.match(/\/o\/([A-Za-z0-9_-]+)/)![1], clock.now());
+  await linkHit((await callerTexts())[0].body.match(/\/o\/([A-Za-z0-9_-]+)/)![1], clock.now(), undefined, true);
   const again = await askParking(clock, { summary: 'อีกคำถามหนึ่ง เรื่องห้องน้ำ' });
   assert.equal(again.u.outcome, 'caller_declined_followup');
   assert.equal((again.u as any).error.code, 'CONSENT_REQUIRED');

@@ -13,7 +13,7 @@ const outbox: Handler = async (tx: Tx, job, now) => {
   const meta = ob.payload.meta ?? {};
   if (ob.kind === 'sms' && !ob.payload.exempt && (await isOptedOut(tx, ob.payload.sender, ob.payload.to, 'sms'))) {
     await tx.query(`update outbox_events set status = 'dead', last_error = 'opted_out' where id = $1`, [ob.id]);
-    await onSendResult(tx, job.tenant_id, meta, false, true, null, now);
+    await onSendResult(tx, job.tenant_id, meta, false, true, null, now, 'opted_out');
     return;
   }
   const r = await sandboxSend(tx, job.tenant_id, ob, now);

@@ -19,10 +19,14 @@ export function validateOwnerReply(text: string, ctx: ReplyCtx): ReplyCheck {
   const { found } = detectSensitiveNumbers(t);
   for (const f of found) fails.push(f === 'payment_card' ? 'card_number' : 'government_id');
   if (/password|passcode|\botp\b|รหัสผ่าน/i.test(t)) fails.push('credential');
-  const hosts = [...t.matchAll(/(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(?:\/\S*)?/gi)].map(m => m[1].toLowerCase());
-  for (const h of hosts) {
-    if (SHORTENERS.test(h)) { fails.push('short_link'); continue; }
-    if (!ctx.allowedDomains.some(d => h === d || h.endsWith('.' + d))) fails.push('link_not_allowed');
+  // Every link-shaped token: any scheme, "www.", or a dotted name ending in letters of any script (Thai domains too).
+  // URL() puts internationalised names into punycode, so only allow-listed Latin domains can pass (review finding 10).
+  for (const m of t.matchAll(/[a-z][a-z0-9+.-]*:\/\/[^\s"“”<>]+|www\.[^\s"“”<>]+|[^\s"“”<>@:\/]+\.\p{L}{2,}(?:\/[^\s"“”<>]*)?/giu)) {
+    let host = '';
+    try { host = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(m[0]) ? m[0] : 'http://' + m[0]).hostname.toLowerCase(); } catch { fails.push('link_not_allowed'); continue; }
+    if (/^\[.*\]$|^\d{1,3}(\.\d{1,3}){3}$/.test(host)) { fails.push('link_not_allowed'); continue; }
+    if (SHORTENERS.test(host)) { fails.push('short_link'); continue; }
+    if (!ctx.allowedDomains.some(d => host === d || host.endsWith('.' + d))) fails.push('link_not_allowed');
   }
   const business = new Set(ctx.businessPhones.map(digits));
   for (const m of t.matchAll(/\+?\d[\d -]{7,13}\d/g)) {

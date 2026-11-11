@@ -188,6 +188,23 @@ export async function holdSlot(tx: Tx, tenantId: string, a: { slotToken: string;
          and not (kind = 'hold' and hold_expires_at < $3) and appointment_id is distinct from $4`,
       [p.s, span, a.now, a.replacesAppointment]) : { rowCount: 1 };
     if (others.rowCount) throw new ToolError('CONFLICT', 'slot taken', 'slot_taken');
+    // Hold the part of the new span outside the booking's own claim, so nobody else can take it meanwhile (review 13).
+    const own = (await tx.query(`select lower(span) s, upper(span) e from slot_claims where appointment_id = $1 and resource_id = $2 and status = 'active'`,
+      [a.replacesAppointment, p.s])).rows.map(r => [(r.s as Date).getTime(), (r.e as Date).getTime()] as const);
+    let pieces: Array<[number, number]> = [[p.st, p.en]];
+    for (const [os, oe] of own) pieces = pieces.flatMap(([ns, ne]) => [...(ns < os ? [[ns, Math.min(ne, os)] as [number, number]] : []), ...(ne > oe ? [[Math.max(ns, oe), ne] as [number, number]] : [])]);
+    for (const [ps, pe] of pieces.filter(([x, y]) => y > x)) {
+      try {
+        await tx.query('savepoint piece');
+        await tx.query(`insert into slot_claims (tenant_id, id, resource_id, kind, span, hold_ref, hold_expires_at, status) values ($1,$2,$3,'hold',$4,$5,$6,'active')`,
+          [tenantId, uuid(), p.s, `[${new Date(ps).toISOString()},${new Date(pe).toISOString()})`, holdRef, new Date(a.now.getTime() + HOLD_TTL_MS)]);
+        await tx.query('release savepoint piece');
+      } catch (e2: any) {
+        await tx.query('rollback to savepoint piece');
+        if (e2.code === '23P01') throw new ToolError('CONFLICT', 'slot taken', 'slot_taken');
+        throw e2;
+      }
+    }
   }
   const start = p.st + v.buffer_before_min * 60_000;
   const lp = localParts(start, loc.time_zone);
@@ -260,6 +277,8 @@ export async function createBooking(tx: Tx, tenantId: string, a: {
   configVersion: number; notify: (tx: Tx, kind: 'booked', appointmentId: string, text: { th: string; en: string }, phone: string | null) => Promise<void>;
 }) {
   const h = await loadHold(tx, a.holdRef, a.conf);
+  if (h.replaces_appointment) throw new ToolError('VALIDATION_FAILED', 'this hold is for a reschedule, not a new booking');
+  if (h.client_name && a.clientName !== h.client_name) throw new ToolError('VALIDATION_FAILED', 'name differs from the confirmed sentence');
   const pol = await policy(tx);
   if (a.phone) {
     const recent = await tx.query(
@@ -317,9 +336,17 @@ export async function rescheduleBooking(tx: Tx, tenantId: string, a: {
   const h = await loadHold(tx, a.holdRef, a.conf);
   if (h.replaces_appointment !== a.bookingRef) throw new ToolError('VALIDATION_FAILED', 'hold was not made for this booking');
   // Release the old claims first, then secure the new one: one transaction, so a conflict rolls everything back.
-  await tx.query(`update slot_claims set status = 'released' where appointment_id = $1 and status = 'active'`, [a.bookingRef]);
-  const claimId = await secureHoldClaim(tx, tenantId, h, a.now);
-  await tx.query(`update slot_claims set kind = 'booking', appointment_id = $2, hold_expires_at = null where id = $1`, [claimId, a.bookingRef]);
+  await tx.query(`update slot_claims set status = 'released' where (appointment_id = $1 or hold_ref = $2) and status = 'active'`, [a.bookingRef, a.holdRef]);
+  try {
+    await tx.query('savepoint move');
+    await tx.query(`insert into slot_claims (tenant_id, id, resource_id, kind, span, appointment_id, status) values ($1,$2,$3,'booking',$4,$5,'active')`,
+      [tenantId, uuid(), h.staff_id, h.claim_span, a.bookingRef]);
+    await tx.query('release savepoint move');
+  } catch (e: any) {
+    await tx.query('rollback to savepoint move');
+    if (e.code === '23P01') throw new ToolError('CONFLICT', 'new time no longer available', 'slot_taken');
+    throw e;
+  }
   const upd = await tx.query(
     `update appointments set starts_at = $2, ends_at = $3, variant_id = $4, version = version + 1 where id = $1 and version = $5 returning version`,
     [a.bookingRef, h.starts_at, h.ends_at, h.variant_id, a.expectedVersion]);
@@ -334,7 +361,7 @@ export async function rescheduleBooking(tx: Tx, tenantId: string, a: {
 }
 
 export async function cancelBooking(tx: Tx, tenantId: string, a: {
-  bookingRef: string; expectedVersion: number; now: Date; confirmed: boolean;
+  bookingRef: string; expectedVersion: number; now: Date; confirmed: boolean; conf?: Confirmation;
   notify: (tx: Tx, kind: 'cancelled', appointmentId: string, text: { th: string; en: string }, phone: string | null) => Promise<void>; phone: string | null;
 }) {
   const ap = (await tx.query(`select * from appointments where id = $1 for update`, [a.bookingRef])).rows[0];
@@ -345,7 +372,17 @@ export async function cancelBooking(tx: Tx, tenantId: string, a: {
   const consequence = late && pol.body.cancel_text ? pol.body.cancel_text
     : late ? { th: 'ไม่มีนโยบายการยกเลิกในระบบ ทางร้านจะแจ้งเรื่องค่าธรรมเนียม (ถ้ามี) ให้ทราบค่ะ', en: "I don't have the cancellation policy on record; the team will confirm any fee." }
     : { th: '', en: '' };
-  if (!a.confirmed) return { needs_confirmation: true, policy_consequence_text: consequence };
+  const when = localParts((ap.starts_at as Date).getTime(), (await location(tx)).time_zone);
+  const v = await variant(tx, ap.variant_id);
+  const sentence = {
+    th: `ขอยืนยันการยกเลิก: ${v.name} ${renderDateTime(when, when, 'th')}${consequence.th ? ' ' + consequence.th : ''} ยืนยันยกเลิกไหมคะ`,
+    en: `To confirm, you want to cancel ${v.name_en ?? v.name} on ${renderDateTime(when, when, 'en')}.${consequence.en ? ' ' + consequence.en : ''} Shall I cancel it?`,
+  };
+  if (!a.confirmed) return { needs_confirmation: true, policy_consequence_text: consequence, rendered_confirmation: sentence };
+  const c = a.conf;
+  if (!c || Buffer.from(c.spokenSha256, 'hex').compare(sha256(sentence.th + '\n' + sentence.en)) !== 0 || !(c.confirmTurn > c.spokenTurn)) {
+    throw new ToolError('VALIDATION_FAILED', 'cancellation must follow its spoken confirmation');
+  }
   await tx.query(`update appointments set status = 'cancelled', version = version + 1 where id = $1`, [a.bookingRef]);
   await tx.query(`update slot_claims set status = 'released' where appointment_id = $1 and status = 'active'`, [a.bookingRef]);
   await tx.query(`insert into appointment_events (tenant_id, id, appointment_id, kind, before, actor) values ($1,$2,$3,'cancelled',$4,'ai_runtime')`,

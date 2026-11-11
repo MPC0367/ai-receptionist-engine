@@ -32,8 +32,8 @@ const SCHEMAS: Record<string, Schema> = {
   release_hold: S({ hold_ref: { type: 'string', maxLength: 64 } }, ['hold_ref']),
   create_booking: S({ hold_ref: { type: 'string', maxLength: 64 }, client_name: { type: 'string', maxLength: 80 }, send_confirmation_text: { type: 'boolean' } }, ['hold_ref', 'client_name']),
   get_bookings_for_caller: S({}),
-  reschedule_booking: S({ booking_ref: { type: 'string', maxLength: 64 }, hold_ref: { type: 'string', maxLength: 64 } }, ['booking_ref', 'hold_ref']),
-  cancel_booking: S({ booking_ref: { type: 'string', maxLength: 64 }, confirmed: { type: 'boolean' } }, ['booking_ref', 'confirmed']),
+  reschedule_booking: S({ booking_ref: { type: 'string', maxLength: 64 }, hold_ref: { type: 'string', maxLength: 64 }, send_confirmation_text: { type: 'boolean' } }, ['booking_ref', 'hold_ref']),
+  cancel_booking: S({ booking_ref: { type: 'string', maxLength: 64 }, confirmed: { type: 'boolean' }, send_confirmation_text: { type: 'boolean' } }, ['booking_ref', 'confirmed']),
   record_consent: S({ purpose: { type: 'string', enum: ['service_followup'] }, target: { type: 'string', enum: ['ani', 'other_number'] },
     number: { type: 'string', maxLength: 20 }, question_text: { type: 'string', maxLength: 300 } }, ['purpose', 'target', 'question_text']),
   request_owner_answer: S({ question_text: { type: 'string', maxLength: 300 }, summary_source: { type: 'string', enum: ['model', 'caller_words'] },
@@ -163,6 +163,7 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
       const hoursOn = (d: { y: number; m: number; d: number }) => weekly.filter(w => w.weekday === isoWeekday(d)).map(w => ({ from: toT(w.o), to: toT(w.c) }));
       const r = resolveWhen(a.date_phrase, { nowUtcMs: now.getTime(), tz: loc.time_zone, hoursOn });
       if (r.status !== 'ok') return { needs_clarification: r.reason, clarification_options: r.options ?? [], options: [] };
+      if (a.for_booking_ref) await mustOwnBooking(tx, c, a.for_booking_ref, now);
       const base = { variant: v, staff, now, tz: loc.time_zone, pol, excludeAppointment: a.for_booking_ref };
       const exact = await B.availableOn(tx, { ...base, date: r.date, exact: r.time, window: r.window });
       const chosen = B.spread(exact, a.max_options ?? 3);
@@ -182,6 +183,7 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
     }
 
     case 'hold_slot':
+      if (a.for_booking_ref) await mustOwnBooking(tx, c, a.for_booking_ref, now);
       return idempotent(tx, `hold:${c.conversation_id}:${sha256(a.slot_token).toString('hex').slice(0, 24)}`, tool, a, () =>
         B.holdSlot(tx, c.tenant_id, { slotToken: a.slot_token, conversationId: c.conversation_id, clientName: a.client_name, now, replacesAppointment: a.for_booking_ref }));
 
@@ -206,21 +208,22 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
     case 'reschedule_booking': {
       if (m.expected_version === undefined) throw new ToolError('VALIDATION_FAILED', 'expected_version required');
       await mustOwnBooking(tx, c, a.booking_ref, now);
-      return idempotent(tx, `resched:${a.booking_ref}:${a.hold_ref}`, tool, a, () =>
+      return idempotent(tx, `resched:${a.booking_ref}:${a.hold_ref}`, tool, a, async () =>
         B.rescheduleBooking(tx, c.tenant_id, { bookingRef: a.booking_ref, expectedVersion: m.expected_version!, holdRef: a.hold_ref, conf: confirmation(m, now), now,
-          notify: notifier(c, now, true) as any, phone: c.ani }));
+          notify: notifier(c, now, await transactionalYes(tx, c, a, m, `reschedule:${a.booking_ref}`, now)) as any, phone: c.ani }));
     }
 
     case 'cancel_booking': {
       if (m.expected_version === undefined) throw new ToolError('VALIDATION_FAILED', 'expected_version required');
       await mustOwnBooking(tx, c, a.booking_ref, now);
-      if (a.confirmed) confirmation(m, now);
-      const run = () => B.cancelBooking(tx, c.tenant_id, { bookingRef: a.booking_ref, expectedVersion: m.expected_version!, now, confirmed: a.confirmed, notify: notifier(c, now, true) as any, phone: c.ani });
+      const conf = a.confirmed ? confirmation(m, now) : undefined;
+      const run = async () => B.cancelBooking(tx, c.tenant_id, { bookingRef: a.booking_ref, expectedVersion: m.expected_version!, now, confirmed: a.confirmed, conf,
+        notify: notifier(c, now, a.confirmed ? await transactionalYes(tx, c, a, m, `cancel:${a.booking_ref}`, now) : false) as any, phone: c.ani });
       return a.confirmed ? idempotent(tx, `cancel:${a.booking_ref}:${m.expected_version}`, tool, a, run) : run();
     }
 
     case 'record_consent': {
-      const target = a.target === 'ani' ? c.ani : normalisePhone(a.number ?? '', c.jurisdiction);
+      const target = normalisePhone((a.target === 'ani' ? c.ani : a.number) ?? '', c.jurisdiction);
       if (!target) throw new ToolError('VALIDATION_FAILED', 'no valid number', 'cannot_text_number');
       const s = await smsSenderOf(tx, c.tenant_id);
       if (!s) throw new ToolError('CONSENT_REQUIRED', 'no SMS sender registered', 'cannot_text_number');
@@ -237,7 +240,7 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
       const q = cleanSummary(a.question_text);
       const gate = await safetyGate(q);
       if (gate.tier === 'E' || gate.tier === 'P') throw new ToolError('VALIDATION_FAILED', `question tier ${gate.tier}`, 'needs_person');
-      const target = a.reply_target.kind === 'ani' ? c.ani : normalisePhone(a.reply_target.number ?? '', c.jurisdiction);
+      const target = normalisePhone((a.reply_target.kind === 'ani' ? c.ani : a.reply_target.number) ?? '', c.jurisdiction);
       if (!target) throw new ToolError('VALIDATION_FAILED', 'no valid number', 'cannot_text_number');
       const consent = (await tx.query(`select id from consents where scope_ref = $1 and target_hash = $2 and state = 'granted' order by granted_at desc limit 1`,
         [`pending_question:${c.conversation_id}:${sha256(q).toString('hex').slice(0, 16)}`, idHash(target)])).rows[0];
@@ -245,7 +248,7 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
       const variantId = a.variant_ref ? (await resolveVariant(tx, a.variant_ref)).id : undefined;
       return idempotent(tx, `pq:${c.conversation_id}:${sha256(q).toString('hex').slice(0, 24)}`, tool, a, () =>
         createPendingQuestion(tx, c.tenant_id, { conversationId: c.conversation_id, questionText: q, summarySource: a.summary_source, tier: gate.tier as 'N' | 'S',
-          category: gate.category, callerName: a.caller_preferred_name, target, ani: c.ani, consentId: consent.id, lang: c.lang, contextLine: a.context_line,
+          category: gate.category, callerName: a.caller_preferred_name, target, ani: c.ani ? normalisePhone(c.ani, c.jurisdiction) : null, consentId: consent.id, lang: c.lang, contextLine: a.context_line,
           linkedVariantId: variantId, now }));
     }
 
@@ -260,6 +263,16 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
     }
   }
   throw new ToolError('VALIDATION_FAILED', 'unhandled tool');
+}
+
+/** Record transactional consent when the caller said yes to a text about this change (SM-11); otherwise no text. */
+async function transactionalYes(tx: Tx, c: CallClaims, a: Record<string, any>, m: Meta, scope: string, now: Date): Promise<boolean> {
+  if (!a.send_confirmation_text || !c.ani) return false;
+  const s = await smsSenderOf(tx, c.tenant_id);
+  if (!s) return false;
+  await recordConsent(tx, c.tenant_id, { sender: s.sender, target: c.ani, channel: 'sms', purpose: 'transactional', scopeRef: scope,
+    evidence: { turn: m.confirm_turn ?? null, conversation: c.conversation_id }, now });
+  return true;
 }
 
 /** Changes need a verified caller (ANI matches the booking's client identity). */
