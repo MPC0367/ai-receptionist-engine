@@ -17,6 +17,12 @@ const dropNulls = (v: any): any => v && typeof v === 'object' && !Array.isArray(
 const machineLike = (t: string) => /^\s*[{\[]|<\/?[a-z_|]+[^>]*>|\[TOOL|```/i.test(t);
 /** An internal label (S1, H1, B1) in words meant for the caller (Gemma said "ลำดับที่ B1", 12 Nov 2026). */
 const saysLabel = (t: string) => /(^|[^A-Za-z0-9])[SHB]\d{1,3}(?![A-Za-z0-9])/.test(t);
+/** Words that say something was done or is being done that only a tool can do (booked, sent, recorded, transferred). */
+const claimsAction = (raw: string) => {
+  const t = raw.replace(/(ไม่สามารถ|ไม่ได้|ยังไม่|ไม่)\S{0,12}?(ต่อสาย|โอนสาย|บันทึก|ส่ง|จอง)/g, '').replace(/\b(can'?t|cannot|unable to|not able to)\b[^.?!]*/gi, '');
+  return /(บันทึก|ส่ง|จอง|เลื่อน|ยกเลิก|แจ้ง|ฝาก|ล็อก)[^.?!\n]{0,50}(แล้ว|เรียบร้อย)|ต่อสาย|โอนสาย|กำลังดำเนินการ/.test(t) ||
+  /\b(I('ve| have)|it'?s|has been|have been|is)\s+(now\s+)?(booked|sent|recorded|noted|moved|rescheduled|cancel+ed|passed|transferr?ed|confirmed)\b|\b(transferring|putting|connecting) you\b/i.test(t);
+};
 /** A stand-in for a name the caller never gave ("คุณลูกค้า", "customer"): seen from Gemma 4 12B, 12 Nov 2026. */
 const PLACEHOLDER_NAME = /^(คุณ)?\s*(ลูกค้า|ผู้จอง|ผู้โทร|ไม่ทราบ(ชื่อ)?|ไม่ระบุ|-+)\s*$|^(the\s+)?(customer|caller|client|guest|user|unknown|n\/?a|name)$/i;
 const nameProblems = (tool: string, a: any) => ["hold_slot", "create_booking", "log_booking_request"].includes(tool) && typeof a.client_name === "string" && PLACEHOLDER_NAME.test(a.client_name.trim())
@@ -149,7 +155,7 @@ export class Receptionist {
     const em = await this.call.listen(callerText);
     if (em) { this.events.push('emergency_rule'); this.emergencyLine = this.call.turns.at(-1)!.text; return this.emergencyLine; }
     this.messages.push({ role: 'user', content: callerText });
-    let writeFailed = false, wordsOnly = false, retried = false;
+    let writeFailed = false, wordsOnly = false, wasWordsOnly = false, retries = 0;
     for (let step = 0; step < 8; step++) {
       const r = await this.create({
         model: this.model, max_tokens: 4000, cache_control: { type: 'ephemeral' },
@@ -157,19 +163,27 @@ export class Receptionist {
         system: systemPrompt(this.business, this.call.lang) + (wordsOnly ? WORDS_ONLY : ''),
         tools: this.tools(), ...(wordsOnly ? { tool_choice: { type: 'none' } } : {}), messages: this.messages,
       });
-      wordsOnly = false;
+      wasWordsOnly = wordsOnly; wordsOnly = false;
       this.messages.push({ role: 'assistant', content: r.content });
       if (r.stop_reason === 'refusal') { this.events.push('refusal'); return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ เรื่องนี้ดิฉันช่วยไม่ได้ค่ะ' : "I'm sorry, I can't help with that."); }
       const uses = r.content.filter((b: any) => b.type === 'tool_use');
       if (!uses.length) {
         const text = r.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ').trim();
         const broken = r.stop_reason === 'max_tokens' ? 'reply_cut_off' : !text ? 'empty_reply' : machineLike(text) ? 'machine_text_rejected' : '';
-        if (broken && !retried) {
-          // Ask once more, for words only. Gemma 4 12B sometimes starts a tool call it never finishes and runs to the
-          // token cap with nothing to show; asked again without tools it answered every time (12 Nov 2026).
-          this.events.push(broken, 'retried_words_only'); if (text) this.discarded.push(text.slice(0, 300));
-          this.messages.pop(); retried = true; wordsOnly = true;
+        if (broken && retries < 2) {
+          // Gemma 4 12B sometimes starts a tool call it never finishes and runs to the token cap with nothing to show
+          // (12 Nov 2026). Ask again with the tools (a second sample usually completes the call), then for words only:
+          // without tools it answered every time, but it may then claim what it never did (checked below).
+          retries++; wordsOnly = retries === 2;
+          this.events.push(broken, wordsOnly ? 'retried_words_only' : 'retried'); if (text) this.discarded.push(text.slice(0, 300));
+          this.messages.pop();
           continue;
+        }
+        if (wasWordsOnly && claimsAction(text)) {
+          // No tool could run in a words-only reply, so a claim that something was done is false by construction
+          // (Gemma: "บันทึกคำถาม…ไว้ให้ทีมงานแล้วค่ะ" when nothing was sent).
+          this.events.push('claim_without_tool'); this.discarded.push(text.slice(0, 300));
+          return this.fallback(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
         }
         if (r.stop_reason === 'max_tokens') {
           // A reply cut off at the token limit is never read out (one run on Gemma 4 12B ran on to the limit).

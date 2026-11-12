@@ -166,8 +166,9 @@ test('markup or silence is never read to a caller', async () => {
   assert.equal(await rec.respond('มีที่จอดรถไหมคะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
   brain = () => text('');
   assert.equal(await rec.respond('ฮัลโหลค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
-  assert.deepEqual(rec.events, ['machine_text_rejected', 'retried_words_only', 'machine_text_rejected', 'empty_reply', 'retried_words_only', 'empty_reply'], 'one words-only retry each, then the runtime line');
-  assert.equal(client.stats.toolCallsAsText, 2);
+  assert.deepEqual(rec.events, ['machine_text_rejected', 'retried', 'machine_text_rejected', 'retried_words_only', 'machine_text_rejected',
+    'empty_reply', 'retried', 'empty_reply', 'retried_words_only', 'empty_reply'], 'a retry with tools, one for words only, then the runtime line');
+  assert.equal(client.stats.toolCallsAsText, 3);
   assert.ok(!call.turns.some(t => t.text.includes('tool_call')));
 });
 
@@ -317,7 +318,7 @@ test('a reply cut off at the token limit is never read out', async () => {
   const cut = { messages: { create: async () => fromOpenAI({ choices: [{ finish_reason: 'length', message: { content: 'ค่ะ ค่ะ ค่ะ ค่ะ' } }] }, stats) } };
   const rec = new Receptionist(cut, call, 'stand-in', 'ร้านสปาตัวอย่าง');
   assert.equal(await rec.respond('สวัสดีค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
-  assert.deepEqual(rec.events, ['reply_cut_off', 'retried_words_only', 'reply_cut_off']);
+  assert.deepEqual(rec.events, ['reply_cut_off', 'retried', 'reply_cut_off', 'retried_words_only', 'reply_cut_off']);
 });
 
 test('an emergency stays an emergency: "still not conscious" triggers the rule, and a discarded reply repeats 1669', async () => {
@@ -349,16 +350,28 @@ test('a runaway reply is asked again once, for words only: no tools offered, no 
   const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
   const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
   let step = 0;
-  brain = () => ++step === 1 ? { text: '', cut: true } : text('ขออภัยค่ะ ไม่ทราบว่าต้องการเลื่อนเป็นวันไหนคะ');
+  brain = () => ++step <= 2 ? { text: '', cut: true } : text('ขออภัยค่ะ ไม่ทราบว่าต้องการเลื่อนเป็นวันไหนคะ');
   bodies.length = 0;
   const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
   assert.equal(await rec.respond('ขอเลื่อนนัดค่ะ'), 'ขออภัยค่ะ ไม่ทราบว่าต้องการเลื่อนเป็นวันไหนคะ');
-  assert.deepEqual(rec.events, ['reply_cut_off', 'retried_words_only']);
-  assert.ok(bodies[0].body.tools?.length, 'the first ask has tools');
-  assert.ok(!('tools' in bodies[1].body), 'the retry has none');
-  assert.match(bodies[1].body.messages[0].content, /you cannot use tools/);
-  assert.ok(!bodies[1].body.messages.some((m: any) => m.role === 'assistant' && m.content === ''), 'the broken reply is not left in the history');
+  assert.deepEqual(rec.events, ['reply_cut_off', 'retried', 'reply_cut_off', 'retried_words_only']);
+  assert.ok(bodies[0].body.tools?.length && bodies[1].body.tools?.length, 'the first ask and the first retry have tools');
+  assert.ok(!('tools' in bodies[2].body), 'the second retry has none');
+  assert.match(bodies[2].body.messages[0].content, /you cannot use tools/);
+  assert.ok(!bodies[2].body.messages.some((m: any) => m.role === 'assistant' && m.content === ''), 'the broken reply is not left in the history');
   assert.ok(!rec.messages.some((m: any) => Array.isArray(m.content) && m.content.length === 0));
   const next = toOpenAI({ model: 'm', max_tokens: 10, tools: TOOL_SPECS, tool_choice: { type: 'none' }, messages: [{ role: 'user', content: 'x' }] }, PROVIDERS.cerebras);
   assert.equal(next.tool_choice, 'none', 'OpenAI-compatible hosts get tool_choice none');
+});
+
+test('a words-only reply that claims something was done is never read out', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = () => ++step <= 2 ? { text: '', cut: true } : text('ดิฉันบันทึกคำถามเรื่องที่จอดรถไว้ให้ทีมงานตรวจสอบแล้วค่ะ');
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('ฝากถามเรื่องที่จอดรถด้วยค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
+  assert.equal(rec.events.at(-1), 'claim_without_tool');
+  assert.ok(!call.turns.some(t => t.text.includes('บันทึกคำถาม')));
 });
