@@ -59,8 +59,14 @@ export function normalisePhone(raw: string, country: 'TH' | 'US'): string | null
 
 async function resolveVariant(tx: Tx, ref: string) {
   const r = await tx.query(`select id from service_variants where id::text = $1 or lower(name) = lower($1) or lower($1) = any(select lower(a) from unnest(aliases) a)`, [ref]);
-  if (!r.rowCount) throw new ToolError('NOT_FOUND', 'variant', 'need_more_detail');
-  if (r.rowCount > 1) throw new ToolError('AMBIGUOUS', 'several variants match', 'need_more_detail');
+  // Say what was not found and what there is: a bare NOT_FOUND was read as "no free times" (Gemma 4 12B searched for
+  // "นวดเท้า 60" — the menu has 45 — and told the caller ten times that nothing was free, 13 Nov 2026).
+  if (r.rowCount !== 1) {
+    const menu = (await tx.query(`select name from service_variants order by name`)).rows.map(x => x.name);
+    if (!r.rowCount) throw new ToolError('NOT_FOUND', 'variant', 'need_more_detail',
+      { not_found: 'service', given: ref, menu, note: 'No service has that name. This is not about free times: pick one from the menu with the caller.' });
+    throw new ToolError('AMBIGUOUS', 'several variants match', 'need_more_detail', { ambiguous: 'service', given: ref, menu });
+  }
   return B.variant(tx, r.rows[0].id);
 }
 

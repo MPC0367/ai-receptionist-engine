@@ -18,12 +18,15 @@ const DEFAULT_HINT: Record<ErrorCode, Hint> = {
 
 export class ToolError extends Error {
   code: ErrorCode; hint: Hint;
-  constructor(code: ErrorCode, internal: string, hint?: Hint) {
+  /** Safe, model-facing facts that say what to fix (e.g. the menu when a service name was not found). */
+  detail?: Record<string, unknown>;
+  constructor(code: ErrorCode, internal: string, hint?: Hint, detail?: Record<string, unknown>) {
     super(internal);
     this.code = code;
     this.hint = hint ?? DEFAULT_HINT[code];
+    this.detail = detail;
   }
   toResult() {
-    return { ok: false as const, error: { code: this.code, retryable: RETRYABLE[this.code], speakable_hint: this.hint } };
+    return { ok: false as const, error: { code: this.code, retryable: RETRYABLE[this.code], speakable_hint: this.hint, ...(this.detail ? { detail: this.detail } : {}) } };
   }
 }

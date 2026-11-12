@@ -41,6 +41,26 @@ export function promisesTransfer(raw: string): boolean {
     /\b(I('ll| will| am going to|'m going to| am)|let me|I'm)\s+(now\s+)?(transfer(ring)?|put(ting)?|connect(ing)?) you\b|\b(transferring|putting|connecting) you (now|through|to)\b/i.test(s));
 }
 
+/**
+ * Words that tell the caller their question goes to the team, or that the team will get back to them ("จะส่งคำถามให้
+ * ทางทีมงานแจ้งกลับ…", "I'll pass this to the team"), outside offers and refusals. Gemma 4 12B said so without calling
+ * request_owner_answer, and no question was ever sent (13 Nov 2026).
+ */
+export function promisesRelay(raw: string): boolean {
+  const th = raw.replace(/(ไม่สามารถ|ไม่ได้|ยังไม่|ไม่)\S{0,12}?(ส่ง|ฝาก|แจ้ง)/g, '');
+  const offer = (c: string) => /(ไหม|มั้ย|หรือไม่|หรือเปล่า)(คะ|ครับ|ค่ะ)?\?*$|\?$/.test(c) || /^(หรือ)?(ต้องการ|อยาก)ให้/.test(c);
+  const thai = /(จะ|เดี๋ยว|ขออนุญาต|กำลัง)\S{0,30}?(ส่ง|ฝาก|แจ้ง|ประสานงาน)\S{0,30}?(คำถาม|ทีมงาน|แจ้งกลับ|ติดต่อกลับ|ทางข้อความ|ส่งข้อความ)|(ส่งคำถาม|ส่งเรื่อง|ฝากคำถาม)\S{0,40}?(แล้ว|เรียบร้อย)|ทีมงานจะ\S{0,20}?(แจ้งกลับ|ติดต่อกลับ|ส่งข้อความ)/;
+  if (th.split(/\s+/).some(c => thai.test(c) && !offer(c))) return true;
+  return raw.split(/(?<=[.!?])\s+/).some(s => !/\?\s*$/.test(s) && !/\b(can'?t|cannot|unable|not able)\b/i.test(s) &&
+    /\b(I('ll| will| have|'ve)|let me)\s+(send|pass|forward|passed|sent|forwarded)\b[^.?!]{0,40}\b(team|owner|question|message)\b|\bthe team will (text|call|contact|get back to|reply)\b/i.test(s));
+}
+
+const NO_RELAY_MADE = `
+
+Your last reply told the caller their question would go to the team, or that the team would get back to them, but
+nothing was sent. If the caller agreed, call record_consent and then request_owner_answer now; otherwise do not say it
+will be sent.`;
+
 /** Added to the instructions after a reply promised a transfer that was never made. */
 const NO_TRANSFER_MADE = `
 
@@ -62,6 +82,8 @@ Rules (the runtime enforces them; breaking one discards your reply):
 - Never state a fact, price, time, duration, address or policy unless it came from a tool result in this call or from the caller. Numbers you write are checked against tool results.
 - Bookings: identify the service with the caller, then call search_availability with the caller's own date/time words in date_phrase (do not convert them). If it returns needs_clarification, ask that question. Offer at most three times, reading the start_local text exactly. When the caller picks one, call hold_slot with that slot_token and the caller's name. The runtime then reads the exact confirmation sentence aloud itself — do not repeat or paraphrase it. Only after the caller clearly says yes, call create_booking (send_confirmation_text true only if the caller agreed to a text).
 - If a time is taken (CONFLICT), say so briefly and offer the alternatives the tools give.
+- A NOT_FOUND or AMBIGUOUS error names what was not found and gives the menu: it never means there are no free times.
+  Only search_availability's own result says whether a time is free.
 - Questions: call get_business_facts. If it returns no_answer or conflict, say you don't have a confirmed answer and won't guess; offer to send the question to the team and text the caller their reply. If the caller wants that: restate the question in one short neutral sentence and ask if it is right, confirm the number (the one they are calling from unless they give another) and ask permission to text about this question; then call record_consent, then request_owner_answer. The runtime reads the expectation sentence itself.
 - You already have the number the caller is calling from: never ask for it.
 - References in tool results such as S1, H1, B1 are internal labels: pass them to tools exactly, never say them to the caller.
@@ -135,6 +157,8 @@ export class Receptionist {
   private emergencyLine: string | undefined;
   /** A transfer the gateway reported as bridged (only DTMF "1" from staff counts, INV-09). */
   private bridged = false;
+  /** A question or booking request the gateway accepted for the team (request_owner_answer / log_booking_request). */
+  private relayed = false;
 
   private client: ModelClient; private call: Call; private model: string; private business: string; private effort: 'low' | 'medium';
   /** What the simulated transfer does (Gate A model runs: nobody is available; tests may bridge one). */
@@ -181,12 +205,13 @@ export class Receptionist {
     const em = await this.call.listen(callerText);
     if (em) { this.events.push('emergency_rule'); this.emergencyLine = this.call.turns.at(-1)!.text; return this.emergencyLine; }
     this.messages.push({ role: 'user', content: callerText });
-    let writeFailed = false, wordsOnly = false, wasWordsOnly = false, retries = 0, transferNote = false, transferCorrected = false;
+    let writeFailed = false, wordsOnly = false, wasWordsOnly = false, retries = 0;
+    const corrected = new Set<string>(), notes = new Set<string>();
     for (let step = 0; step < 8; step++) {
       const r = await this.create({
         model: this.model, max_tokens: 4000, cache_control: { type: 'ephemeral' },
         output_config: { effort: this.effort },
-        system: systemPrompt(this.business, this.call.lang) + (wordsOnly ? WORDS_ONLY : '') + (transferNote ? NO_TRANSFER_MADE : ''),
+        system: systemPrompt(this.business, this.call.lang) + (wordsOnly ? WORDS_ONLY : '') + [...notes].join(''),
         tools: this.tools(), ...(wordsOnly ? { tool_choice: { type: 'none' } } : {}), messages: this.messages,
       });
       wasWordsOnly = wordsOnly; wordsOnly = false;
@@ -227,14 +252,13 @@ export class Receptionist {
           this.events.push(!text ? 'empty_reply' : saysLabel(text) && !machineLike(text) ? 'label_spoken_rejected' : 'machine_text_rejected'); if (text) this.discarded.push(text.slice(0, 300));
           return this.fallback(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
         }
-        if (!this.bridged && promisesTransfer(text)) {
-          // A transfer said but not made: the caller would wait for a person who never comes. Ask once more with a
+        const promise = this.unbackedPromise(text);
+        if (promise) {
+          // Said but not done: the caller would wait for a person, or an answer, that never comes. Ask once more with a
           // note; if it says so again, the runtime tells the caller the truth.
-          this.events.push('transfer_promise_without_tool'); this.discarded.push(text.slice(0, 300));
-          if (!transferCorrected) { transferCorrected = true; transferNote = true; this.messages.pop(); continue; }
-          return this.fallback(this.call.lang === 'th'
-            ? 'ขออภัยค่ะ ตอนนี้ดิฉันยังต่อสายให้เจ้าหน้าที่ไม่ได้ค่ะ ดิฉันช่วยเรื่องนี้ต่อได้ หรือฝากเรื่องให้ทีมงานติดต่อกลับได้ค่ะ'
-            : "I'm sorry, I can't put you through to a person right now. I can keep helping with this, or pass a message to the team.");
+          this.events.push(promise.event); this.discarded.push(text.slice(0, 300));
+          if (!corrected.has(promise.event)) { corrected.add(promise.event); notes.add(promise.note); this.messages.pop(); continue; }
+          return this.fallback(promise.line[this.call.lang]);
         }
         if (!grounded(text, this.call.corpus)) {
           this.events.push('grounding_rejected');
@@ -277,6 +301,17 @@ export class Receptionist {
   }
 
   private speakCode(text: string) { this.call.say(text); return text; }
+
+  /** A reply that says something was or will be done which no tool in this call did (a transfer, a question sent). */
+  private unbackedPromise(text: string) {
+    if (!this.bridged && promisesTransfer(text)) return { event: 'transfer_promise_without_tool', note: NO_TRANSFER_MADE, line: {
+      th: 'ขออภัยค่ะ ตอนนี้ดิฉันยังต่อสายให้เจ้าหน้าที่ไม่ได้ค่ะ ดิฉันช่วยเรื่องนี้ต่อได้ หรือฝากเรื่องให้ทีมงานติดต่อกลับได้ค่ะ',
+      en: "I'm sorry, I can't put you through to a person right now. I can keep helping with this, or pass a message to the team." } };
+    if (!this.relayed && promisesRelay(text)) return { event: 'relay_promise_without_tool', note: NO_RELAY_MADE, line: {
+      th: 'ขออภัยค่ะ เรื่องนี้ยังไม่ได้ส่งถึงทีมงานนะคะ ต้องการให้ดิฉันส่งคำถามนี้ให้ทีมงานแจ้งกลับทางข้อความไหมคะ',
+      en: "I'm sorry, this hasn't been sent to the team yet. Would you like me to send your question so they can text you back?" } };
+    return null;
+  }
 
   /**
    * What the runtime says when it throws a reply away. Once an emergency has come up in the call, that is the emergency
@@ -327,6 +362,7 @@ export class Receptionist {
       this.lastHold = { ref: r.data.hold_ref, rendered: r.data.rendered_confirmation, spokenTurn: this.call.say(text), forBooking: input.for_booking_ref };
       return { result: { ok: true, data: { hold_ref: r.data.hold_ref, spoken_to_caller: true } }, say: text };
     }
+    if ((name === 'request_owner_answer' || name === 'log_booking_request') && r.ok) this.relayed = true;
     if (name === 'request_owner_answer' && r.ok) { this.call.say(r.data.speakable_expectation); this.call.outcomes.push('pq_created'); return { result: { ok: true, data: { pq_handle: r.data.pq_handle } }, say: r.data.speakable_expectation }; }
     if (name === 'log_booking_request' && r.ok) { this.call.say(r.data.speakable); return { result: { ok: true, data: {} }, say: r.data.speakable }; }
     return { result: r };

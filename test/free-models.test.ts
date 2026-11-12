@@ -422,3 +422,45 @@ test('after a bridged transfer, saying so is the truth', async () => {
   assert.equal(await rec.respond('ขอสายพนักงานค่ะ'), 'ต่อสายให้เจ้าหน้าที่แล้วค่ะ');
   assert.deepEqual(rec.events, []);
 });
+
+test('promisesRelay: "I\'ll send your question to the team" caught; offers and refusals kept', async () => {
+  const { promisesRelay } = await import('../sim/model/receptionist.ts');
+  for (const t of ['ยืนยันว่าคำถามคือเรื่องที่จอดรถนะคะ จะส่งคำถามให้ทางทีมงานแจ้งกลับผ่านเบอร์โทรศัพท์ที่ท่านกำลังใช้งานอยู่ค่ะ', 'ยินดีค่ะ เดี๋ยวจะรีบประสานงานให้ทราบทางข้อความนะคะ',
+    'ดิฉันส่งคำถามให้ทีมงานเรียบร้อยแล้วค่ะ', "I'll pass your question to the team.", 'The team will text you back soon.'])
+    assert.ok(promisesRelay(t), `promise: ${t}`);
+  for (const t of ['ให้ดิฉันส่งคำถามนี้ให้ทีมงานแจ้งกลับทางข้อความให้ไหมคะ?', 'ต้องการให้ดิฉันฝากคำถามไว้ให้ทีมงานไหมคะ', 'ตอนนี้ยังไม่ได้ส่งคำถามให้ทีมงานนะคะ',
+    'Would you like me to pass this to the team?', "I can't send messages right now.", 'ขอทราบวันที่สะดวกค่ะ'])
+    assert.ok(!promisesRelay(t), `not a promise: ${t}`);
+});
+
+test('a promised relay that was not made: asked again, the model sends the question and the runtime reads the expectation', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = () => {
+    step++;
+    if (step === 1) return text('จะส่งคำถามให้ทางทีมงานแจ้งกลับทางข้อความค่ะ');
+    if (step === 2) return tool('record_consent', { purpose: 'service_followup', target: 'ani', question_text: 'ร้านมีที่จอดรถไหม' });
+    if (step === 3) return tool('request_owner_answer', { question_text: 'ร้านมีที่จอดรถไหม', summary_source: 'model', reply_target: { kind: 'ani' } });
+    return text('ค่ะ');
+  };
+  bodies.length = 0;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  const said = await rec.respond('ใช่ค่ะ ใช้เบอร์นี้ ส่งข้อความได้ค่ะ');
+  assert.deepEqual(rec.events, ['relay_promise_without_tool']);
+  assert.match(bodies[1].body.messages[0].content, /nothing was sent/);
+  assert.ok(call.outcomes.includes('pq_created'), 'the question really went to the team');
+  assert.ok(said.length > 0 && !said.includes('จะส่งคำถามให้ทางทีมงาน'));
+});
+
+test('an unknown service name says it is the service, with the menu — not "no free times"', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const r = await call.tool('search_availability', { variant_ref: 'นวดเท้า 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'NOT_FOUND');
+  assert.equal(r.error.detail.not_found, 'service');
+  assert.ok(r.error.detail.menu.includes('นวดเท้า 45 นาที'));
+  assert.match(r.error.detail.note, /not about free times/);
+});
