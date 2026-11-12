@@ -7,9 +7,14 @@
 import { createHash } from 'node:crypto';
 import type { Call } from '../session.ts';
 import { grounded } from '../../src/knowledge.ts';
-import { TOOL_SPECS } from './tools.ts';
+import { TOOL_SPECS, checkArgs } from './tools.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+/** Open models often send null for an optional field; null means "not given". */
+const dropNulls = (v: any): any => v && typeof v === 'object' && !Array.isArray(v)
+  ? Object.fromEntries(Object.entries(v).filter(([, x]) => x !== null).map(([k, x]) => [k, dropNulls(x)])) : v;
+/** Text that is markup or JSON, not something a person would say (a tool call written as text, a template leak). */
+const machineLike = (t: string) => /^\s*[{\[]|<\/?[a-z_|]+[^>]*>|\[TOOL|```/i.test(t);
 
 /** Minimal client surface (the real SDK client or the test double). */
 export type ModelClient = { messages: { create(p: any): Promise<any> }; beta?: { messages: { create(p: any): Promise<any> } } };
@@ -84,6 +89,11 @@ export class Receptionist {
       const uses = r.content.filter((b: any) => b.type === 'tool_use');
       if (!uses.length) {
         const text = r.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ').trim();
+        if (!text || machineLike(text)) {
+          // Never read markup or silence to a caller (seen with open models that write a tool call as text).
+          this.events.push(text ? 'machine_text_rejected' : 'empty_reply');
+          return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
+        }
         if (!grounded(text, this.call.corpus)) {
           this.events.push('grounding_rejected');
           return this.speakCode(this.call.lang === 'th' ? 'ดิฉันยังไม่มีคำตอบที่ยืนยันได้สำหรับเรื่องนี้ และไม่อยากเดาค่ะ' : "I don't have a confirmed answer to that, and I don't want to guess.");
@@ -94,7 +104,15 @@ export class Receptionist {
       const results = [];
       const spoken: string[] = [];
       for (const u of uses) {
-        const { result, say } = await this.runTool(u.name, u.input);
+        const input = dropNulls(u.input);
+        const problems = checkArgs(u.name, input);
+        if (problems.length) {
+          // The tool never runs on a malformed call; the model is told what was wrong and may try again.
+          this.events.push('invalid_tool_call');
+          results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify({ ok: false, error: { code: 'INVALID_ARGUMENTS', problems } }), is_error: true });
+          continue;
+        }
+        const { result, say } = await this.runTool(u.name, input);
         if (say) spoken.push(say);
         results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify(result), ...(result.ok ? {} : { is_error: true }) });
       }

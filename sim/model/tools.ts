@@ -36,3 +36,35 @@ export const TOOL_SPECS = [
   { name: 'log_booking_request', description: 'When bookings cannot be confirmed now, pass a request to the team (not a booking).',
     input_schema: obj({ variant_ref: str('service'), date_phrase: str("caller's words"), client_name: str("caller's name") }, ['variant_ref', 'date_phrase']) },
 ];
+
+/**
+ * Checks a model's tool arguments against the model-facing schema above. Claude's strict tool use guarantees the
+ * shape; open models served by Ollama or an OpenAI-compatible host do not, so the runtime checks every call itself and
+ * hands a fault back to the model instead of running the tool. Returns the problems found (none = valid).
+ */
+export function checkArgs(name: string, input: unknown): string[] {
+  const spec = TOOL_SPECS.find(t => t.name === name);
+  if (!spec) return [`unknown tool ${name}`];
+  return checkValue(spec.input_schema, input, 'arguments');
+}
+
+function checkValue(schema: any, v: unknown, at: string): string[] {
+  if (schema.type === 'object') {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return [`${at} must be an object`];
+    const o = v as Record<string, unknown>, out: string[] = [];
+    for (const k of schema.required ?? []) if (o[k] === undefined || o[k] === null) out.push(`${at}.${k} is required`);
+    for (const [k, val] of Object.entries(o)) {
+      if (!(k in schema.properties)) { if (schema.additionalProperties === false) out.push(`${at}.${k} is not a known field`); continue; }
+      if (val === undefined || (val === null && !(schema.required ?? []).includes(k))) continue;
+      out.push(...checkValue(schema.properties[k], val, `${at}.${k}`));
+    }
+    return out;
+  }
+  if (schema.type === 'string') {
+    if (typeof v !== 'string') return [`${at} must be a string`];
+    if (schema.enum && !schema.enum.includes(v)) return [`${at} must be one of ${schema.enum.join(', ')}`];
+    return [];
+  }
+  if (schema.type === 'boolean') return typeof v === 'boolean' ? [] : [`${at} must be true or false`];
+  return [];
+}

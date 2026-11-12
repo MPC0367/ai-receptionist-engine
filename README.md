@@ -9,7 +9,7 @@ first with LINE as the owner channel, massage / day spa, LiveKit Agents as the f
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 73 tests (resets the rcpt_test database per test)
+npm test              # 83 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -33,7 +33,7 @@ link script: run `node scripts/hydrate-symlinks.js` from inside `node_modules/@e
 | `src/privacy.ts` | SM-12, SM-13 | Transcripts and stand-in recordings; retention passes (recordings 30 d incl. the provider's copy, content 90 d) honouring legal holds; code-verified deletion requests with an evidence package |
 | `src/connectors/calendar.ts` | SM-10, §7.8 | Google Calendar: free/busy only from the owner's calendars, bookings mirrored to an app-created calendar with deterministic event ids, scope check, pause on revoked access, 410 resync, owner edits → staff tasks |
 | `src/runtime/limits.ts` | §10.9, SM-2 | Latency watchdog (filler 1.8 s, recovery 4 s) and the call clock (warn 13 min, end 15 min) |
-| `sim/model/` | D-04b | Model-driven runs: the model under test is the receptionist behind the deterministic runtime, a second model plays the caller, graders check the database; `node sim/model/run.ts` (dry run unless `--yes`, hard budget cap) |
+| `sim/model/` | D-04b | Model-driven runs: the model under test is the receptionist behind the deterministic runtime, a second model plays the caller, graders check the database; `node sim/model/run.ts` (dry run unless `--yes`, hard budget cap). `free-models.ts` runs the same harness on free routes (below) |
 | `sim/fake-google.ts` | §17 | Google Calendar API v3 stand-in (shapes, 409, 410, 401, injected faults) |
 | `spikes/livekit-transfer/` | D-04, SM-9 | The screened-transfer spike on self-hosted LiveKit + SIPp: seven cases pass (12 Nov 2026). Start at its `RESULTS.md`; `PLAN.md` was the plan |
 | `sim/` | §17 | Seed, the scripted stand-in for the voice runtime (`session.ts`), and the demo (`run.ts`) |
@@ -46,7 +46,7 @@ link script: run `node scripts/hydrate-symlinks.js` from inside `node_modules/@e
 - Transfers are simulated in the engine (`transfer_sim`); only DTMF "1" counts as a human (INV-09). The LiveKit spike
   proved the real thing over SIP on 12 Nov 2026 (`spikes/livekit-transfer/RESULTS.md`): staff is screened in the
   caller's room with the caller's track muted at the server, because self-hosted LiveKit has no MoveParticipant.
-- Model-driven runs need Anthropic credentials (`ANTHROPIC_API_KEY` in the git-ignored `.env.local`, or an `ant auth login` profile) and the owner's yes to spend (given 12 Nov 2026); the
+- Model-driven runs on Claude need Anthropic credentials (`ANTHROPIC_API_KEY` in the git-ignored `.env.local`, or an `ant auth login` profile) and the owner's yes to spend (given 12 Nov 2026); the
   Opus 5.5 and Sonnet 5.5 calls opt into the server-side refusal fallback (`fallbacks: "default"`).
 - Recording is off by default for Thai tenants (D-09); the policy flag `recording` turns it on (the greeting then says so).
 - The owner web reply page accepts its one-time token alone; production also needs an owner session.
@@ -54,3 +54,31 @@ link script: run `node scripts/hydrate-symlinks.js` from inside `node_modules/@e
 - The link domain `r.example.invalid` is a placeholder; a real one must be registered for Thai SMS (NBTC).
 - Configuration is read live; pinning a call to a configuration snapshot is recorded but not enforced yet.
 - Emergency numbers in `jurisdiction_contacts` are marked "PENDING human verification".
+
+## Free model routes (12 Nov 2026)
+
+The same harness runs on open models at no cost (`sim/model/free-models.ts`): Ollama on this Mac (native `/api/chat`,
+so the context window is set per request, 16,384 tokens by default, `--num-ctx`), Cerebras's free trial and
+Google's Gemini free tier (OpenAI-compatible `/chat/completions`), or any other OpenAI-compatible host
+(`--provider openai-compatible --base-url …`). The runtime checks every tool call against the model-facing schema
+itself (`checkArgs` in `tools.ts`): Claude's strict tool use guarantees the shape, these routes do not. A malformed call
+never runs; the model gets `INVALID_ARGUMENTS` with the faults and the run counts it. Markup or an empty reply is
+never read to a caller (`machine_text_rejected`, `empty_reply`). Reasoning in `<think>` is stripped.
+
+```bash
+npm run model:run -- --provider ollama --models gemma4:12b --yes          # local; the model must be pulled first
+npm run model:run -- --provider cerebras --models gpt-oss-120b --yes      # CEREBRAS_API_KEY in .env.local
+npm run model:run -- --provider gemini --models gemini-3.8-flash --yes    # GEMINI_API_KEY in .env.local
+```
+
+- Keys: `sh scripts/save-key.sh cerebras` (or `gemini`, `anthropic`): a hidden prompt; other saved keys are kept.
+- One caller model for every receptionist model keeps the comparison fair: `--caller-provider`, `--caller-model`
+  (default: the first `--models` entry on the same provider).
+- Nothing is downloaded by the harness: a missing Ollama model stops the run with the `ollama pull` line to approve.
+- Rate limits are waited out (Cerebras 5 a minute, Gemini 10 a minute, `--min-interval-ms`); a quota that is used up
+  stops the run cleanly and the results so far are written. Cerebras stops at 900,000 tokens (`--max-tokens`).
+- Ollama's `think`: `--think on|off` or a level the model names (gpt-oss: `low`, `medium`, `high`).
+- Gemini's free tier uses prompts to improve Google's products: fictional data only, as here.
+- What these runs cannot say: how Claude would do. No prompt caching, server-side fallback or strict tool use on this
+  route. Tested against a stand-in server only (`test/free-models.test.ts`); no real model has run yet.
+
