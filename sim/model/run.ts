@@ -74,7 +74,7 @@ export async function runOne(client: ModelClient, callerClient: ModelClient, sc:
     cost: cost(model, rec.usage) + cost(callerModel, callerUsage), transcript: call.turns.map(t => `${t.who === 'ai' ? 'AI' : 'Caller'}: ${t.text}`) };
 }
 
-type Opts = { baseURL?: string; numCtx?: string; think?: string; minInterval?: string };
+type Opts = { baseURL?: string; numCtx?: string; think?: string; minInterval?: string; temperature?: string };
 
 async function clientFor(provider: string, o: Opts): Promise<ModelClient> {
   if (provider === 'anthropic') {
@@ -83,7 +83,7 @@ async function clientFor(provider: string, o: Opts): Promise<ModelClient> {
   }
   if (!(provider in PROVIDERS)) throw new Error(`Unknown provider ${provider} (anthropic, ${Object.keys(PROVIDERS).join(', ')})`);
   return new CompatClient({ provider: provider as Provider, baseURL: o.baseURL, numCtx: o.numCtx ? Number(o.numCtx) : undefined,
-    think: o.think, minIntervalMs: o.minInterval ? Number(o.minInterval) : undefined });
+    think: o.think, minIntervalMs: o.minInterval ? Number(o.minInterval) : undefined, temperature: o.temperature ? Number(o.temperature) : undefined });
 }
 
 if (import.meta.main) {
@@ -96,7 +96,7 @@ if (import.meta.main) {
   const callerProvider = arg('--caller-provider', provider)!;
   const callerModel = arg('--caller-model', callerProvider === 'anthropic' ? 'claude-opus-5-5' : models[0])!;
   const repeats = Number(arg('--repeats', '2')), budget = Number(arg('--budget-usd', '30'));
-  const opts: Opts = { baseURL: arg('--base-url'), numCtx: arg('--num-ctx'), think: arg('--think'), minInterval: arg('--min-interval-ms') };
+  const opts: Opts = { baseURL: arg('--base-url'), numCtx: arg('--num-ctx'), think: arg('--think'), minInterval: arg('--min-interval-ms'), temperature: arg('--temperature') };
   const only = arg('--only')?.split(',');
   const list = scenarios(A).filter(s => !only || only.includes(s.id));
   if (!list.length) { console.log(`No scenario matches --only ${only}.`); process.exit(1); }
