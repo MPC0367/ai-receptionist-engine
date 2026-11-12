@@ -75,6 +75,19 @@ export function verifySlot(token: string, tenantId: string, now: Date): SlotPayl
   return p;
 }
 
+/** A booking as it stands, for the confirmation text the caller said yes to after it was made (no client name in it). */
+export async function bookingSummary(tx: Tx, appointmentId: string): Promise<{ th: string; en: string }> {
+  const ap = (await tx.query(`select a.variant_id, a.starts_at, a.status, (select resource_id from slot_claims s where s.appointment_id = a.id
+    and s.kind = 'booking' and s.status = 'active' limit 1) staff_id from appointments a where a.id = $1`, [appointmentId])).rows[0];
+  if (!ap || ap.status !== 'booked' || !ap.staff_id) throw new ToolError('NOT_FOUND', 'booking');
+  const v = await variant(tx, ap.variant_id), loc = await location(tx);
+  const sr = (await tx.query('select display_name, name_en from resources where id = $1', [ap.staff_id])).rows[0];
+  const lp = localParts(new Date(ap.starts_at).getTime(), loc.time_zone);
+  const a = { variant: v, staff: { th: sr.display_name as string, en: (sr.name_en ?? sr.display_name) as string }, date: { y: lp.y, m: lp.m, d: lp.d }, t: { h: lp.h, mi: lp.mi } };
+  return { th: confirmationText('th', a).replace(/^ขอทวนนะคะ: /, 'นัดของคุณ: ').replace(/ ยืนยันจองเลยไหมคะ$/, ''),
+    en: confirmationText('en', a).replace(/^To confirm: /, 'Your booking: ').replace(/\. Shall I book it\?$/, '.') };
+}
+
 // Availability ------------------------------------------------------------------------------------------
 export type SlotOption = { slot_token: string; staff_id: string; staff_name: string; start_utc: string; start_local_th: string; start_local_en: string };
 
@@ -388,7 +401,9 @@ export async function rescheduleBooking(tx: Tx, tenantId: string, a: {
     [tenantId, uuid(), a.bookingRef, JSON.stringify({ starts_at: ap.starts_at }), JSON.stringify({ starts_at: h.starts_at })]);
   await audit(tx, tenantId, { machine: 'SM-5', entity: a.bookingRef, from: 'committing', to: 'rescheduled', event: 'rescheduled', actor: 'ai_runtime', at: a.now });
   await mirrorIfConnected(tx, tenantId, h.staff_id, a.bookingRef, Number(upd.rows[0].version), a.now);
-  const text = { th: h.rendered_th.replace(/^ขอทวนนะคะ: /, 'เลื่อนนัดเรียบร้อยแล้วค่ะ: ').replace(/ ยืนยันจองเลยไหมคะ$/, ''), en: h.rendered_en.replace(/^To confirm: /, 'Moved to: ').replace(/ Shall I book it\?$/, '') };
+  // The hold reads as a move ("ขอทวนนะคะ: เลื่อนนัด… ยืนยันเลื่อนนัดเลยไหมคะ"); the summary keeps both times, drops the question.
+  const text = { th: h.rendered_th.replace(/^ขอทวนนะคะ: (เลื่อนนัด)?/, 'เลื่อนนัดเรียบร้อยแล้วค่ะ: ').replace(/ ยืน(ยันเลื่อนนัด|ยันจอง)เลยไหมคะ$/, ''),
+    en: h.rendered_en.replace(/^To confirm: (moving your )?/, 'Moved: your ').replace(/\. Shall I (move|book) it\?$/, '.') };
   await a.notify(tx, 'rescheduled', a.bookingRef, text, a.phone);
   return { booking_ref: a.bookingRef, new_version: Number(upd.rows[0].version), rendered_summary: text };
 }

@@ -50,7 +50,7 @@ test('harness: the scripted model books through the gateway; the runtime speaks 
   const r1 = await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ ชื่ออันนา');
   assert.match(r1, /^ขอทวนนะคะ: นวดไทย 60 นาที/, 'the runtime, not the model, read the confirmation');
   const r2 = await rec.respond('ใช่ค่ะ');
-  assert.equal(r2, 'จองเรียบร้อยแล้วค่ะ');
+  assert.equal(r2, 'จองเรียบร้อยแล้วค่ะ ต้องการรับข้อความยืนยันการจองทางเบอร์ที่โทรมาไหมคะ', 'after the booking the runtime offers the text');
   assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from appointments`)).rows[0].n), 1);
   assert.ok(model.params.every(p => p.system && p.cache_control?.type === 'ephemeral' && p.output_config?.effort === 'low'));
   assert.ok(model.params.every(p => p.tools.every((t: any) => t.strict === true)));

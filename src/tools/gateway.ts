@@ -43,6 +43,8 @@ const SCHEMAS: Record<string, Schema> = {
     reply_target: { type: 'object', properties: { kind: { type: 'string', enum: ['ani', 'other_number'] }, number: { type: 'string', maxLength: 20 } }, required: ['kind'] },
     caller_preferred_name: { type: 'string', maxLength: 60 }, context_line: { type: 'string', maxLength: 160 }, variant_ref: { type: 'string', maxLength: 80 } },
     ['question_text', 'summary_source', 'reply_target']),
+  // Runtime-only, never offered to the model: the confirmation text the caller said yes to when the runtime offered it.
+  send_booking_text: S({ booking_ref: { type: 'string', maxLength: 64 } }, ['booking_ref']),
   log_booking_request: S({ variant_ref: { type: 'string', maxLength: 80 }, date_phrase: { type: 'string', maxLength: 80 }, client_name: { type: 'string', maxLength: 80 } }, ['variant_ref', 'date_phrase']),
   request_human_transfer: S({ reason: { type: 'string', enum: ['caller_asked', 'unknown_question', 'sensitive', 'frustration', 'tool_failure'] }, topic: { type: 'string', maxLength: 80 } }, ['reason', 'topic']),
 };
@@ -74,6 +76,12 @@ async function resolveVariant(tx: Tx, ref: string) {
 
 async function smsSenderOf(tx: Tx, tenantId: string) {
   return (await tx.query(`select sender, two_way from senders where tenant_id = $1 and channel = 'sms'`, [tenantId])).rows[0] as { sender: string; two_way: boolean } | undefined;
+}
+
+/** Whether this caller can be texted at all: a valid mobile for the country, a sender, no STOP. */
+async function canText(tx: Tx, c: CallClaims) {
+  const to = c.ani ? normalisePhone(c.ani, c.jurisdiction) : null, s = await smsSenderOf(tx, c.tenant_id);
+  return !!(to && s && !(await isOptedOut(tx, s.sender, to, 'sms')));
 }
 
 /** Booking notices: owner on LINE; client by SMS only if the caller said yes and has not opted out. */
@@ -225,8 +233,9 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
           if (s) await recordConsent(tx, c.tenant_id, { sender: s.sender, target: c.ani!, channel: 'sms', purpose: 'transactional', scopeRef: `booking_confirmation:${a.hold_ref}`,
             evidence: { turn: m.text_consent_turn, conversation: c.conversation_id }, now });
         }
-        return B.createBooking(tx, c.tenant_id, { holdRef: a.hold_ref, clientName: a.client_name, phone: c.ani, conversationId: c.conversation_id, conf, now,
+        const r = await B.createBooking(tx, c.tenant_id, { holdRef: a.hold_ref, clientName: a.client_name, phone: c.ani, conversationId: c.conversation_id, conf, now,
           configVersion: c.config_version, notify: notifier(c, now, text) as any });
+        return { ...r, text_queued: text, can_text: await canText(tx, c) };
       });
 
     case 'get_bookings_for_caller':
@@ -235,9 +244,31 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
     case 'reschedule_booking': {
       if (m.expected_version === undefined) throw new ToolError('VALIDATION_FAILED', 'expected_version required');
       await mustOwnBooking(tx, c, a.booking_ref, now);
-      return idempotent(tx, `resched:${a.booking_ref}:${a.hold_ref}`, tool, a, async () =>
-        B.rescheduleBooking(tx, c.tenant_id, { bookingRef: a.booking_ref, expectedVersion: m.expected_version!, holdRef: a.hold_ref, conf: confirmation(m, now), now,
-          notify: notifier(c, now, await transactionalYes(tx, c, a, m, `reschedule:${a.booking_ref}`, now)) as any, phone: c.ani }));
+      return idempotent(tx, `resched:${a.booking_ref}:${a.hold_ref}`, tool, a, async () => {
+        const text = await transactionalYes(tx, c, a, m, `reschedule:${a.booking_ref}`, now);
+        const r = await B.rescheduleBooking(tx, c.tenant_id, { bookingRef: a.booking_ref, expectedVersion: m.expected_version!, holdRef: a.hold_ref, conf: confirmation(m, now), now,
+          notify: notifier(c, now, text) as any, phone: c.ani });
+        return { ...r, text_queued: text, can_text: await canText(tx, c) };
+      });
+    }
+
+    case 'send_booking_text': {
+      // The runtime offered a confirmation text after the booking and the caller said yes (text_consent_turn); the
+      // model never sees this tool.
+      if (m.text_consent_turn === undefined || !c.ani) throw new ToolError('CONSENT_REQUIRED', 'no yes to a text', 'cannot_text_number');
+      await mustOwnBooking(tx, c, a.booking_ref, now);
+      return idempotent(tx, `booktext:${a.booking_ref}:${c.conversation_id}`, tool, a, async () => {
+        const to = normalisePhone(c.ani!, c.jurisdiction), s = await smsSenderOf(tx, c.tenant_id);
+        if (!to || !s || await isOptedOut(tx, s.sender, to, 'sms')) throw new ToolError('CONSENT_REQUIRED', 'cannot text this number', 'cannot_text_number');
+        await recordConsent(tx, c.tenant_id, { sender: s.sender, target: to, channel: 'sms', purpose: 'transactional', scopeRef: `booking_text:${a.booking_ref}`,
+          evidence: { turn: m.text_consent_turn, conversation: c.conversation_id }, now });
+        const summary = await B.bookingSummary(tx, a.booking_ref);
+        const name = (await tx.query('select name from locations limit 1')).rows[0].name;
+        const footer = await optOutFooter(tx, c.tenant_id, to, c.lang, s.two_way, now);
+        await enqueue(tx, c.tenant_id, { kind: 'sms', key: `appt:${a.booking_ref}:text:${c.conversation_id}`, to, sender: s.sender, now,
+          body: `${name}: ${c.lang === 'th' ? summary.th : summary.en}${footer}`, meta: { appointment_id: a.booking_ref, purpose: 'appt_confirmation_client' } });
+        return { queued: true };
+      });
     }
 
     case 'cancel_booking': {

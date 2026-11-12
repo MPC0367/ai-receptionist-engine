@@ -27,7 +27,8 @@ export function scenarios(A: string): Scenario[] {
         const confirmIdx = call.turns.findIndex(t => t.who === 'ai' && t.text.startsWith('ขอทวนนะคะ'));
         return check([[ap.length === 1, 'exactly one booking'],
           [ap[0] && new Date(ap[0].starts_at).toISOString() === '2026-11-13T08:00:00.000Z', 'Fri 13 Nov 15:00 Bangkok'],
-          [confirmIdx >= 0, 'confirmation sentence spoken by the runtime']]);
+          [confirmIdx >= 0, 'confirmation sentence spoken by the runtime'],
+          [await textsTo(A, '+66812340001') === 1, 'one confirmation text: the caller said yes when it was offered']]);
       } },
     { id: 'M02-ambiguous-clock', lang: 'th', ani: '+66812340002',
       persona: 'คุณชื่อ "ต้น" ขอจองนวดเท้าพรุ่งนี้ "สามโมง" (ไม่บอกว่าเช้าหรือบ่าย) ถ้าถูกถามให้ตอบว่าบ่ายสาม ตกลงเวลาที่เสนอ แล้ววางสาย',

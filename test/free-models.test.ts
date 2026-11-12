@@ -61,7 +61,7 @@ const booker: Brain = msgs => {
     return tool('create_booking', { hold_ref: hold, client_name: 'อันนา', send_confirmation_text: false });
   }
   if (u.includes('จอง')) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม', staff_ref: null });
-  return text('ค่ะ');
+  return text('<think>the caller thanked me</think>ค่ะ');
 };
 
 async function bookThrough(client: CompatClient) {
@@ -71,15 +71,17 @@ async function bookThrough(client: CompatClient) {
   const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
   const r1 = await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ ชื่ออันนา');
   const r2 = await rec.respond('ใช่ค่ะ');
+  const r3 = await rec.respond('ขอบคุณครับ');
   const booked = await withTenant(A, async tx => (await tx.query(`select count(*)::int n from appointments`)).rows[0].n);
-  return { r1, r2, booked, rec };
+  return { r1, r2, r3, booked, rec };
 }
 
 test('OpenAI-compatible route: books end to end; tool calls and results keep their ids; Claude-only fields are not sent', async () => {
   const client = new CompatClient({ provider: 'openai-compatible', baseURL: `http://127.0.0.1:${port}/v1`, apiKey: 'test-key' });
-  const { r1, r2, booked, rec } = await bookThrough(client);
+  const { r1, r2, r3, booked, rec } = await bookThrough(client);
   assert.match(r1, /^ขอทวนนะคะ: นวดไทย 60 นาที/, 'the runtime read the confirmation');
-  assert.equal(r2, 'จองเรียบร้อยแล้วค่ะ', 'reasoning in <think> is never spoken');
+  assert.equal(r2, 'จองเรียบร้อยแล้วค่ะ ต้องการรับข้อความยืนยันการจองทางเบอร์ที่โทรมาไหมคะ', 'the runtime offers the text');
+  assert.equal(r3, 'ค่ะ', 'a thank-you is not a yes ("ครับ" holds "รับ"), and reasoning in <think> is never spoken');
   assert.equal(booked, 1);
   assert.deepEqual(rec.events, []);
   const last = bodies.at(-1)!.body;
@@ -106,7 +108,7 @@ test('Ollama route: books end to end with arguments as objects and a context win
   assert.match((await client.preflight(['gemma4:12b']))[0], /ollama pull gemma4:12b/);
   const { r1, r2, booked } = await bookThrough(client);
   assert.match(r1, /^ขอทวนนะคะ/);
-  assert.equal(r2, 'จองเรียบร้อยแล้วค่ะ');
+  assert.match(r2, /ต้องการรับข้อความยืนยัน/);
   assert.equal(booked, 1);
   const last = bodies.at(-1)!.body;
   assert.ok(bodies.every(b => b.path === '/api/chat'));
@@ -474,6 +476,7 @@ test('texting words: the question, the answer and the promise', async () => {
   assert.equal(yesNo('ได้ค่ะ'), 'yes'); assert.equal(yesNo('ค่ะ ส่งมาเลย'), 'yes'); assert.equal(yesNo('Yes, please.'), 'yes');
   assert.equal(yesNo('ไม่ต้องค่ะ'), 'no'); assert.equal(yesNo('ใช่ค่ะ จองเลย ไม่ต้องส่งข้อความนะคะ'), 'no'); assert.equal(yesNo("No thanks."), 'no');
   assert.equal(yesNo('วันพรุ่งนี้บ่ายสาม'), null);
+  assert.equal(yesNo('ขอบคุณครับ'), null, '"ครับ" contains "รับ" but is not a yes'); assert.equal(yesNo('ค่ะ'), 'yes'); assert.equal(yesNo('ได้เลยครับ ขอบคุณครับ'), 'yes');
   for (const t of ['จะส่งข้อความยืนยันไปที่เบอร์นี้นะคะ', 'ส่งข้อความยืนยันให้เรียบร้อยแล้วค่ะ', "I'll send you a text confirmation.", 'A confirmation text has been sent.'])
     assert.ok(promisesText(t), `promise: ${t}`);
   for (const t of ['ต้องการให้ส่งข้อความยืนยันไหมคะ', 'ครั้งนี้ยังไม่ได้ส่งข้อความยืนยันนะคะ', 'Would you like me to send a text confirmation?', "I won't send a text."])
@@ -528,15 +531,22 @@ test('a text only after the caller says yes to the question; never on the model\
   };
   const unasked = await run(false);
   assert.equal(unasked.booked, 1);
-  assert.equal(unasked.texts, 0, 'never asked: no text');
+  assert.equal(unasked.texts, 0, 'the flag alone sends nothing');
   assert.ok(unasked.rec.events.includes('text_without_consent'));
-  assert.equal(unasked.last, 'จองเรียบร้อยแล้วค่ะ', 'the model is told no text went, so it does not promise one');
+  assert.equal(unasked.last, 'จองเรียบร้อยแล้วค่ะ ต้องการรับข้อความยืนยันการจองทางเบอร์ที่โทรมาไหมคะ', 'so the runtime offers it');
+  const offeredYes = await run(false, 'ได้ค่ะ');
+  assert.equal(offeredYes.texts, 1, 'offered by the runtime, yes: one text');
+  assert.equal(offeredYes.last, 'ส่งข้อความยืนยันไปที่เบอร์นี้แล้วค่ะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ');
+  const offeredNo = await run(false, 'ไม่ต้องค่ะ');
+  assert.equal(offeredNo.texts, 0, 'offered by the runtime, no: no text');
+  assert.equal(offeredNo.last, 'ได้ค่ะ ไม่ส่งข้อความนะคะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ');
   const yes = await run(true, 'ได้ค่ะ');
-  assert.equal(yes.texts, 1, 'asked and yes: one text');
-  assert.deepEqual(yes.rec.events, []);
+  assert.equal(yes.texts, 1, 'the model asked and the caller said yes: one text, and no second offer');
+  assert.ok(!yes.rec.events.includes('text_without_consent'));
   const no = await run(true, 'ไม่ต้องค่ะ');
   assert.equal(no.booked, 1);
-  assert.equal(no.texts, 0, 'asked and no: no text');
+  assert.equal(no.texts, 0, 'the model asked and the caller said no: no text');
+  assert.ok(!no.last.includes('ต้องการรับข้อความยืนยัน'), 'a caller who said no is not asked again');
 });
 
 test('"a text is on its way" with no text queued is caught', async () => {
@@ -546,4 +556,45 @@ test('"a text is on its way" with no text queued is caught', async () => {
   const rec = new Receptionist(new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` }), call, 'stand-in', 'ร้านสปาตัวอย่าง');
   assert.equal(await rec.respond('ขอบคุณค่ะ'), 'ขออภัยค่ะ ครั้งนี้ยังไม่ได้ส่งข้อความยืนยันนะคะ');
   assert.deepEqual(rec.events, ['text_promise_without_consent', 'text_promise_without_consent']);
+});
+
+test('send_booking_text: needs the runtime\'s evidence, only for the caller\'s own booking, once', async () => {
+  const clock = await fresh();
+  const texts = (to: string) => withTenant(A, async tx => (await tx.query(`select count(*)::int n from outbox_events where payload->>'to' = $1`, [to])).rows[0].n);
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const b = await call.book({ service: 'นวดไทย 60', when: 'พรุ่งนี้บ่ายสาม', name: 'อันนา' });
+  const ref = b.result.data.booking_ref;
+  assert.equal(b.result.data.text_queued, false);
+  assert.equal(b.result.data.can_text, true);
+  const before = await texts(CALLER);
+  const none = await call.tool('send_booking_text', { booking_ref: ref });
+  assert.equal(!none.ok && none.error.code, 'CONSENT_REQUIRED', 'no evidence, no text');
+  const yes = call.hear('ได้ค่ะ');
+  assert.ok((await call.tool('send_booking_text', { booking_ref: ref }, { text_consent_turn: yes })).ok);
+  assert.ok((await call.tool('send_booking_text', { booking_ref: ref }, { text_consent_turn: yes })).ok, 'a repeat is answered, not sent again');
+  assert.equal(await texts(CALLER) - before, 1);
+  const body = await withTenant(A, async tx => (await tx.query(`select payload->>'body' b from outbox_events where payload->>'to' = $1 order by created_at desc limit 1`, [CALLER])).rows[0].b);
+  assert.match(body, /นัดของคุณ: นวดไทย 60 นาที กับคุณนก วันศุกร์ที่ 13 พฤศจิกายน 2569 เวลา 15:00 น\./);
+  assert.ok(!body.includes('อันนา'), 'no client name in the text');
+  const other = (await Call.start({ dialed: NUM.A.dialed, ani: '+66899999999', now: () => clock.now() })).call;
+  const t = other.hear('ได้ค่ะ');
+  const stranger = await other.tool('send_booking_text', { booking_ref: ref }, { text_consent_turn: t });
+  assert.equal(!stranger.ok && stranger.error.code, 'NOT_FOUND', 'another caller cannot have someone else\'s booking texted');
+});
+
+test('a move\'s summary keeps both times and drops the question', async () => {
+  const clock = await fresh();
+  const pre = (await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() })).call;
+  await pre.book({ service: 'นวดไทย 60', when: '20 พ.ย. 69 บ่ายสาม', name: 'บี' }); await pre.end();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const mine = await call.tool('get_bookings_for_caller', {});
+  const b = mine.data.bookings[0];
+  const s = await call.tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: '21 พ.ย. 69 บ่ายสาม', for_booking_ref: b.booking_ref });
+  const h = await call.tool('hold_slot', { slot_token: s.data.options[0].slot_token, client_name: 'บี', for_booking_ref: b.booking_ref });
+  const spoken = call.say(h.data.rendered_confirmation.th), yes = call.hear('ใช่ค่ะ');
+  const r = await call.tool('reschedule_booking', { booking_ref: b.booking_ref, hold_ref: h.data.hold_ref },
+    { expected_version: b.version, spoken_confirmation_sha256: sha(h.data.rendered_confirmation.th + '\n' + h.data.rendered_confirmation.en), spoken_turn: spoken, confirm_turn: yes });
+  assert.ok(r.ok);
+  assert.equal(r.data.rendered_summary.th, 'เลื่อนนัดเรียบร้อยแล้วค่ะ: นวดไทย 60 นาที จากวันศุกร์ที่ 20 พฤศจิกายน 2569 เวลา 15:00 น. (บ่ายสามโมง) เป็นวันเสาร์ที่ 21 พฤศจิกายน 2569 เวลา 15:00 น. (บ่ายสามโมง) กับคุณนก');
+  assert.equal(r.data.rendered_summary.en, "Moved: your Thai massage, 60 minutes from Friday 20 November 2026 at 3:00 pm to Saturday 21 November 2026 at 3:00 pm with Nok.");
 });

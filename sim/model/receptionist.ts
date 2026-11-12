@@ -71,9 +71,15 @@ export function asksAboutText(t: string): boolean {
 /** The caller's answer to it: a refusal wins over any yes in the same turn ("ใช่ค่ะ จองเลย ไม่ต้องส่งข้อความนะคะ"). */
 export function yesNo(t: string): 'yes' | 'no' | null {
   if (/ไม่ต้อง|ไม่เอา|ไม่ใช่|ไม่รับ|ไม่สะดวก|ไม่ค่ะ|ไม่ครับ|^\s*ไม่|\b(no|nope|don'?t|do not|not needed|no need|no thanks)\b/i.test(t)) return 'no';
-  if (/ใช่|ได้|โอเค|ตกลง|เอา|รับ|ส่งมา|ส่งด้วย|ยินดี|สะดวก|^\s*(ค่ะ|ครับ|คะ)|\b(yes|yeah|yep|sure|ok(ay)?|please|that'?s fine)\b/i.test(t)) return 'yes';
+  // Thai has no spaces, and substrings mislead ("ขอบคุณครับ" contains "รับ"), so the yes words are whole words.
+  const words = [...THAI_WORDS.segment(t)].filter(s => s.isWordLike).map(s => s.segment.toLowerCase());
+  const particles = new Set(['ค่ะ', 'คะ', 'ครับ', 'ค่า', 'จ้ะ', 'จ้า', 'นะ', 'คับ']);
+  if (words.some(w => YES_WORDS.has(w)) || (words.length > 0 && words.every(w => particles.has(w)))) return 'yes';
+  if (/\b(yes|yeah|yep|sure|ok(ay)?|please|that'?s fine)\b/i.test(t)) return 'yes';
   return null;
 }
+const THAI_WORDS = new Intl.Segmenter('th', { granularity: 'word' });
+const YES_WORDS = new Set(['ใช่', 'ได้', 'โอเค', 'ตกลง', 'เอา', 'รับ', 'ส่ง', 'ยินดี', 'สะดวก', 'ok', 'yes'])
 
 /** "I'll text you a confirmation" / "จะส่งข้อความยืนยันไปที่เบอร์นี้" outside offers and refusals. */
 export function promisesText(raw: string): boolean {
@@ -89,6 +95,15 @@ const NO_TEXT_SENT = `
 
 Your last reply said a confirmation text was coming, but none was sent: a text goes only after you ask whether they
 want one and the caller says yes. Do not say a text is coming.`;
+
+/** The runtime's own words around a confirmation text. */
+const OFFER = {
+  booked: { th: 'จองเรียบร้อยแล้วค่ะ ต้องการรับข้อความยืนยันการจองทางเบอร์ที่โทรมาไหมคะ', en: "You're booked. Would you like a text confirming the booking at this number?" },
+  moved: { th: 'เลื่อนนัดเรียบร้อยแล้วค่ะ ต้องการรับข้อความยืนยันนัดทางเบอร์ที่โทรมาไหมคะ', en: "That's moved. Would you like a text confirming the booking at this number?" },
+  sent: { th: 'ส่งข้อความยืนยันไปที่เบอร์นี้แล้วค่ะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ', en: "I've texted the confirmation to this number. Is there anything else I can help with?" },
+  no: { th: 'ได้ค่ะ ไม่ส่งข้อความนะคะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ', en: 'No problem, no text. Is there anything else I can help with?' },
+  cannot: { th: 'ขออภัยค่ะ ส่งข้อความไปที่เบอร์นี้ไม่ได้ค่ะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ', en: "Sorry, I can't text this number. Is there anything else I can help with?" },
+};
 
 /** Added to the instructions after a reply promised a transfer that was never made. */
 const NO_TRANSFER_MADE = `
@@ -191,6 +206,9 @@ export class Receptionist {
   /** The last AI turn that offered a confirmation text, and whether one was queued with the caller's yes. */
   private textAskedTurn: number | null = null;
   private textQueued = false;
+  /** The runtime's own offer of a confirmation text, waiting for the caller's answer. */
+  private textOffer: { bookingRef: string } | null = null;
+  private textDeclined = false;
 
   private client: ModelClient; private call: Call; private model: string; private business: string; private effort: 'low' | 'medium';
   /** What the simulated transfer does (Gate A model runs: nobody is available; tests may bridge one). */
@@ -235,8 +253,10 @@ export class Receptionist {
   /** One caller utterance in, the receptionist's spoken reply out (possibly after several tool calls). */
   async respond(callerText: string): Promise<string> {
     const em = await this.call.listen(callerText);
-    if (em) { this.events.push('emergency_rule'); this.emergencyLine = this.call.turns.at(-1)!.text; return this.emergencyLine; }
+    if (em) { this.textOffer = null; this.events.push('emergency_rule'); this.emergencyLine = this.call.turns.at(-1)!.text; return this.emergencyLine; }
     this.messages.push({ role: 'user', content: callerText });
+    const answered = await this.answerTextOffer(callerText);
+    if (answered) return answered;
     let writeFailed = false, wordsOnly = false, wasWordsOnly = false, retries = 0;
     const corrected = new Set<string>(), notes = new Set<string>();
     for (let step = 0; step < 8; step++) {
@@ -335,15 +355,40 @@ export class Receptionist {
 
   private speakCode(text: string) { this.call.say(text); return text; }
 
+  /** The caller's answer to the runtime's text offer: yes sends it, no settles it, anything else goes to the model. */
+  private async answerTextOffer(callerText: string): Promise<string | null> {
+    const offer = this.textOffer;
+    if (!offer) return null;
+    this.textOffer = null;
+    const verdict = yesNo(callerText), lang = this.call.lang;
+    if (verdict === null) return null;
+    let line: string;
+    if (verdict === 'no') { this.textDeclined = true; line = OFFER.no[lang]; this.events.push('text_declined'); }
+    else {
+      const yes = this.call.turns.filter(t => t.who === 'caller').at(-1)!.seq;
+      const r = await this.call.tool('send_booking_text', { booking_ref: offer.bookingRef }, { text_consent_turn: yes });
+      if (r.ok) { this.textQueued = true; line = OFFER.sent[lang]; this.events.push('text_sent_on_yes'); }
+      else { line = OFFER.cannot[lang]; this.events.push('text_send_failed'); }
+    }
+    this.call.say(line);
+    this.messages.push({ role: 'assistant', content: [{ type: 'text', text: `(The runtime said to the caller: "${line}")` }] });
+    return line;
+  }
+
   /**
    * Whether a write may send a confirmation text: only if an AI turn offered one and the caller's next turn said yes.
    * The model's send_confirmation_text alone never sends one (it set the flag unasked, 12 Nov 2026).
    */
   private textConsent(input: any): { input: any; turn?: number; note?: string } {
+    if (this.textAskedTurn !== null) {
+      const ans = this.call.turns.find(t => t.who === 'caller' && t.seq > this.textAskedTurn!);
+      if (ans && yesNo(ans.text) === 'no') this.textDeclined = true;
+    }
     if (!input.send_confirmation_text) return { input };
     const answer = this.textAskedTurn === null ? undefined : this.call.turns.find(t => t.who === 'caller' && t.seq > this.textAskedTurn!);
     const verdict = answer ? yesNo(answer.text) : null;
     if (answer && verdict === 'yes') return { input, turn: answer.seq };
+    if (answer && verdict === 'no') this.textDeclined = true;
     this.events.push('text_without_consent');
     return { input: { ...input, send_confirmation_text: false },
       note: answer && verdict === 'no' ? 'not_sent: the caller said no to a text' : 'not_sent: the caller was not asked whether they want a text, so none was sent' };
@@ -376,7 +421,14 @@ export class Receptionist {
       const meta = { spoken_confirmation_sha256: sha(this.lastHold.rendered.th + '\n' + this.lastHold.rendered.en), spoken_turn: this.lastHold.spokenTurn,
         confirm_turn: lastCaller, expected_version: input.booking_ref ? this.versions.get(input.booking_ref) : undefined, text_consent_turn: text.turn };
       const r = await this.call.tool(name, text.input, meta);
-      if (r.ok) { this.lastHold = null; this.call.outcomes.push(name === 'create_booking' ? 'booked' : 'rescheduled'); if (text.turn !== undefined) this.textQueued = true; }
+      if (r.ok) { this.lastHold = null; this.call.outcomes.push(name === 'create_booking' ? 'booked' : 'rescheduled'); if (r.data.text_queued) this.textQueued = true; }
+      if (r.ok && !r.data.text_queued && r.data.can_text && !this.textDeclined) {
+        // The runtime offers the text itself (the owner's "Yes, offer it", 13 Nov 2026: Gemma never asked).
+        const offer = OFFER[name === 'create_booking' ? 'booked' : 'moved'][this.call.lang];
+        this.textOffer = { bookingRef: name === 'create_booking' ? r.data.booking_ref : input.booking_ref };
+        this.textAskedTurn = this.call.say(offer);
+        return { result: { ...r, data: { ...r.data, confirmation_text: 'offered: the runtime asked whether they want a text' } }, say: offer };
+      }
       return { result: text.note && r.ok ? { ...r, data: { ...r.data, confirmation_text: text.note } } : r };
     }
     if (name === 'cancel_booking') {
