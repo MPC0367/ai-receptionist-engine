@@ -94,7 +94,8 @@ export function toOllama(p: any, o: Pick<CompatOptions, 'numCtx' | 'think'>) {
   const thinking = !!o.think && o.think !== 'off';
   // Thinking tokens count against num_predict: with thinking on, the answer gets its own room on top (Gemma 4 12B spent
   // the caller's whole 400 on thinking and said nothing, 12 Nov 2026).
-  const body: any = { model: p.model, messages, stream: false, options: { num_ctx: o.numCtx ?? 16_384, num_predict: thinking ? p.max_tokens + 8_192 : p.max_tokens } };
+  // Without thinking a reply is a sentence or a tool call: 1,024 bounds a runaway (one ran to 4,000 tokens, ~1 min).
+  const body: any = { model: p.model, messages, stream: false, options: { num_ctx: o.numCtx ?? 16_384, num_predict: thinking ? p.max_tokens + 8_192 : Math.min(p.max_tokens, 1_024) } };
   if (p.tools?.length) body.tools = p.tools.map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
   if (o.think) body.think = o.think === 'on' ? true : o.think === 'off' ? false : o.think;
   return body;

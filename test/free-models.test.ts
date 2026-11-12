@@ -151,8 +151,8 @@ test('a label the tools never gave (or a mangled real token) is refused before t
   let step = 0;
   brain = () => ++step === 1 ? tool('hold_slot', { slot_token: 'S9', client_name: 'มด' }) : step === 2 ? tool('cancel_booking', { booking_ref: 'eyJ0IjoiMTEx.forged', confirmed: true }) : text('ขอเช็กอีกครั้งนะคะ');
   const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
-  assert.equal(await rec.respond('จองเวลาเมื่อกี้เลยค่ะ'), 'ขอเช็กอีกครั้งนะคะ');
-  assert.deepEqual(rec.events, ['unknown_reference', 'invalid_tool_call', 'unknown_reference', 'invalid_tool_call']);
+  assert.equal(await rec.respond('จองเวลาเมื่อกี้เลยค่ะ'), 'ขออภัยค่ะ รายการนี้ยังไม่สำเร็จ ยังไม่มีการเปลี่ยนแปลงใดๆ นะคะ', 'after a refused cancellation the runtime, not the model, speaks');
+  assert.deepEqual(rec.events, ['unknown_reference', 'invalid_tool_call', 'unknown_reference', 'invalid_tool_call', 'unconfirmed_write']);
   assert.match(rec.toolLog[0].problems![0], /slot_token "S9" was not given by a tool/);
   assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from holds`)).rows[0].n), 0);
 });
@@ -278,4 +278,44 @@ test('a name the caller gives with คุณ is not read back as "คุณค�
   const s = await call.tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
   const h = await call.tool('hold_slot', { slot_token: s.data.options[0].slot_token, client_name: 'คุณมด' });
   assert.match(h.data.rendered_confirmation.th, /ในชื่อคุณมด ยืนยัน/);
+});
+
+test('a reschedule: the hold names both times, only reschedule_booking is offered, and a failed write is never called done', async () => {
+  const clock = await fresh();
+  const pre = (await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() })).call;
+  await pre.book({ service: 'นวดไทย 60', when: '20 พ.ย. 69 บ่ายสาม', name: 'บี' });
+  await pre.end();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = msgs => {
+    step++;
+    const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    if (step === 1) return tool('get_bookings_for_caller', {});
+    if (step === 2) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: '21 พ.ย. 69 บ่ายสาม', for_booking_ref: tr.data.bookings[0].booking_ref });
+    if (step === 3) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'บี', for_booking_ref: 'B1' });
+    if (step === 4) return tool('create_booking', { hold_ref: 'H1', client_name: 'บี' });
+    return text('เลื่อนนัดเรียบร้อยแล้วค่ะ');
+  };
+  bodies.length = 0;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  const confirm = await rec.respond('ขอเลื่อนนัดวันที่ 20 เป็นวันที่ 21 พ.ย. บ่ายสามค่ะ');
+  assert.match(confirm, /^ขอทวนนะคะ: เลื่อนนัดนวดไทย 60 นาที จากวันศุกร์ที่ 20 พฤศจิกายน 2569 เวลา 15:00 น\. \(บ่ายสามโมง\) เป็นวันเสาร์ที่ 21 พฤศจิกายน 2569/);
+  assert.match(confirm, /ยืนยันเลื่อนนัดเลยไหมคะ$/);
+  const reply = await rec.respond('ใช่ค่ะ');
+  const offered = bodies.at(-1)!.body.tools.map((t: any) => t.function.name);
+  assert.ok(offered.includes('reschedule_booking') && !offered.includes('create_booking'));
+  assert.match(rec.toolLog.at(-1)!.problems![0], /call reschedule_booking/);
+  assert.equal(reply, 'ขออภัยค่ะ รายการนี้ยังไม่สำเร็จ ยังไม่มีการเปลี่ยนแปลงใดๆ นะคะ', 'never "done" after a refused write');
+  assert.ok(rec.events.includes('unconfirmed_write'));
+});
+
+test('a reply cut off at the token limit is never read out', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const stats: CompatStats = { requests: 0, retries: 0, unparseableArgs: 0, toolCallsAsText: 0, tokens: 0 };
+  const cut = { messages: { create: async () => fromOpenAI({ choices: [{ finish_reason: 'length', message: { content: 'ค่ะ ค่ะ ค่ะ ค่ะ' } }] }, stats) } };
+  const rec = new Receptionist(cut, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('สวัสดีค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
+  assert.deepEqual(rec.events, ['reply_cut_off']);
 });

@@ -87,7 +87,9 @@ export class Receptionist {
   events: string[] = [];
   /** Every tool call the model made, with what came back (for reading a failed run). */
   toolLog: Array<{ name: string; input: unknown; ok: boolean; code?: string; problems?: string[] }> = [];
-  private lastHold: { ref: string; rendered: { th: string; en: string }; spokenTurn: number } | null = null;
+  /** The start of each reply the runtime would not read out (cut off, markup), for reading a run. */
+  discarded: string[] = [];
+  private lastHold: { ref: string; rendered: { th: string; en: string }; spokenTurn: number; forBooking?: string } | null = null;
   private lastCancel: { ref: string; rendered: { th: string; en: string }; spokenTurn: number; version: number } | null = null;
   private versions = new Map<string, number>();
   private refs = new Handles();
@@ -98,9 +100,21 @@ export class Receptionist {
   }
 
   private tools() {
-    // State gating (§9.5): write tools that need a spoken confirmation are offered only once it has been spoken.
-    return TOOL_SPECS.filter(t => !(t.name === 'create_booking' || t.name === 'reschedule_booking') || this.lastHold)
-      .map(t => ({ ...t, strict: true }));
+    // State gating (§9.5): write tools that need a spoken confirmation are offered only once it has been spoken, and
+    // only the one that fits the hold: a hold that moves a booking offers reschedule_booking, any other create_booking.
+    return TOOL_SPECS.filter(t => {
+      if (t.name === 'create_booking') return !!this.lastHold && !this.lastHold.forBooking;
+      if (t.name === 'reschedule_booking') return !!this.lastHold?.forBooking;
+      return true;
+    }).map(t => ({ ...t, strict: true }));
+  }
+
+  /** Why a tool the model called is not on offer right now (open models call tools they were not given). */
+  private notOffered(name: string): string[] {
+    if (this.tools().some(t => t.name === name) || !TOOL_SPECS.some(t => t.name === name)) return [];
+    if (name === 'create_booking' && this.lastHold?.forBooking) return ['create_booking is not available: this hold moves an existing booking, so call reschedule_booking'];
+    if (name === 'reschedule_booking' && this.lastHold) return ['reschedule_booking is not available: this hold is a new booking, so call create_booking'];
+    return [`${name} is not available yet: hold a time and read the confirmation first`];
   }
 
   private async create(params: any) {
@@ -123,6 +137,7 @@ export class Receptionist {
     const em = await this.call.listen(callerText);
     if (em) { this.events.push('emergency_rule'); return this.call.turns.at(-1)!.text; }
     this.messages.push({ role: 'user', content: callerText });
+    let writeFailed = false;
     for (let step = 0; step < 8; step++) {
       const r = await this.create({
         model: this.model, max_tokens: 4000, cache_control: { type: 'ephemeral' },
@@ -135,9 +150,20 @@ export class Receptionist {
       const uses = r.content.filter((b: any) => b.type === 'tool_use');
       if (!uses.length) {
         const text = r.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ').trim();
+        if (r.stop_reason === 'max_tokens') {
+          // A reply cut off at the token limit is never read out (one run on Gemma 4 12B ran on to the limit).
+          this.events.push('reply_cut_off'); this.discarded.push(text.slice(0, 300));
+          return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
+        }
+        if (writeFailed) {
+          // A booking, move or cancellation failed in this turn and nothing succeeded after it: the caller hears that
+          // from the runtime, never the model's words (Gemma said "the move is confirmed" after a refusal, 12 Nov 2026).
+          this.events.push('unconfirmed_write');
+          return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ รายการนี้ยังไม่สำเร็จ ยังไม่มีการเปลี่ยนแปลงใดๆ นะคะ' : "I'm sorry, that hasn't gone through, so nothing has changed yet.");
+        }
         if (!text || machineLike(text)) {
           // Never read markup or silence to a caller (seen with open models that write a tool call as text).
-          this.events.push(text ? 'machine_text_rejected' : 'empty_reply');
+          this.events.push(text ? 'machine_text_rejected' : 'empty_reply'); if (text) this.discarded.push(text.slice(0, 300));
           return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
         }
         if (!grounded(text, this.call.corpus)) {
@@ -151,17 +177,20 @@ export class Receptionist {
       const spoken: string[] = [];
       for (const u of uses) {
         const given = dropNulls(u.input);
-        let problems = [...checkArgs(u.name, given), ...nameProblems(u.name, given)];
+        let problems = [...checkArgs(u.name, given), ...nameProblems(u.name, given), ...this.notOffered(u.name)];
         const { input, problems: refProblems } = problems.length ? { input: given, problems: [] } : this.refs.reveal(given);
         if (refProblems.length) { this.events.push('unknown_reference'); problems = refProblems; }
         if (problems.length) {
           // The tool never runs on a malformed call; the model is told what was wrong and may try again.
           this.events.push('invalid_tool_call');
+          if (['create_booking', 'reschedule_booking'].includes(u.name) || (u.name === 'cancel_booking' && given?.confirmed === true)) writeFailed = true;
           this.toolLog.push({ name: u.name, input: u.input, ok: false, code: 'INVALID_ARGUMENTS', problems });
           results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify({ ok: false, error: { code: 'INVALID_ARGUMENTS', problems } }), is_error: true });
           continue;
         }
         const { result, say } = await this.runTool(u.name, input);
+        const write = u.name === 'create_booking' || u.name === 'reschedule_booking' || (u.name === 'cancel_booking' && input.confirmed === true);
+        if (write) writeFailed = !result.ok;
         this.toolLog.push({ name: u.name, input: given, ok: !!result.ok, ...(result.ok ? {} : { code: result.error?.code ?? result.error?.speakable_hint }) });
         if (say) spoken.push(say);
         results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify(this.refs.hide(result)), ...(result.ok ? {} : { is_error: true }) });
@@ -217,7 +246,7 @@ export class Receptionist {
     if (name === 'get_bookings_for_caller' && r.ok) for (const b of r.data.bookings ?? []) this.versions.set(b.booking_ref, b.version);
     if (name === 'hold_slot' && r.ok) {
       const text = this.call.lang === 'th' ? r.data.rendered_confirmation.th : r.data.rendered_confirmation.en;
-      this.lastHold = { ref: r.data.hold_ref, rendered: r.data.rendered_confirmation, spokenTurn: this.call.say(text) };
+      this.lastHold = { ref: r.data.hold_ref, rendered: r.data.rendered_confirmation, spokenTurn: this.call.say(text), forBooking: input.for_booking_ref };
       return { result: { ok: true, data: { hold_ref: r.data.hold_ref, spoken_to_caller: true } }, say: text };
     }
     if (name === 'request_owner_answer' && r.ok) { this.call.say(r.data.speakable_expectation); this.call.outcomes.push('pq_created'); return { result: { ok: true, data: { pq_handle: r.data.pq_handle } }, say: r.data.speakable_expectation }; }

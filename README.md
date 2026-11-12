@@ -9,7 +9,7 @@ first with LINE as the owner channel, massage / day spa, LiveKit Agents as the f
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 83 tests (resets the rcpt_test database per test)
+npm test              # 87 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -63,7 +63,10 @@ Google's Gemini free tier (OpenAI-compatible `/chat/completions`), or any other 
 (`--provider openai-compatible --base-url …`). The runtime checks every tool call against the model-facing schema
 itself (`checkArgs` in `tools.ts`): Claude's strict tool use guarantees the shape, these routes do not. A malformed call
 never runs; the model gets `INVALID_ARGUMENTS` with the faults and the run counts it. Markup or an empty reply is
-never read to a caller (`machine_text_rejected`, `empty_reply`). Reasoning in `<think>` is stripped.
+never read to a caller (`machine_text_rejected`, `empty_reply`). Reasoning in `<think>` is stripped. On every route the
+model sees short labels (S1, H1, B1) instead of signed slot tokens and UUIDs, and no internal `*_id` fields; the runtime
+maps labels back, and an unknown label is refused (`unknown_reference`). A placeholder for the caller's name
+("คุณลูกค้า", "customer") is refused too: the model must ask.
 
 ```bash
 npm run model:run -- --provider ollama --models gemma4:12b --yes          # local; the model must be pulled first
@@ -77,7 +80,10 @@ npm run model:run -- --provider gemini --models gemini-3.8-flash --yes    # GEMI
 - Nothing is downloaded by the harness: a missing Ollama model stops the run with the `ollama pull` line to approve.
 - Rate limits are waited out (Cerebras 5 a minute, Gemini 10 a minute, `--min-interval-ms`); a quota that is used up
   stops the run cleanly and the results so far are written. Cerebras stops at 900,000 tokens (`--max-tokens`).
-- Ollama's `think`: `--think on|off` or a level the model names (gpt-oss: `low`, `medium`, `high`).
+- Ollama's thinking is off by default where a model can think, as on the Claude route (no extended thinking there,
+  and a phone line cannot wait for it); gpt-oss cannot switch it off and reasons `low`. `--think on` or a level turns
+  it on and gives the answer its own room on top of `max_tokens`.
+- `--only M01-book-thai,M04-emergency` runs chosen scenarios (a timing check first); results carry each run's tool log.
 - Gemini's free tier uses prompts to improve Google's products: fictional data only, as here.
 - What these runs cannot say: how Claude would do. No prompt caching, server-side fallback or strict tool use on this
   route. Tested against a stand-in server only (`test/free-models.test.ts`); no real model has run yet.

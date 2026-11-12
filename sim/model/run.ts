@@ -70,7 +70,7 @@ export async function runOne(client: ModelClient, callerClient: ModelClient, sc:
   await call.end();
   await drain(clock.now());
   const g = await sc.grade(call, rec.events);
-  return { scenario: sc.id, model, pass: g.pass, why: g.why, events: rec.events, tools: rec.toolLog, usage: rec.usage, callerUsage,
+  return { scenario: sc.id, model, pass: g.pass, why: g.why, events: rec.events, tools: rec.toolLog, discarded: rec.discarded, usage: rec.usage, callerUsage,
     cost: cost(model, rec.usage) + cost(callerModel, callerUsage), transcript: call.turns.map(t => `${t.who === 'ai' ? 'AI' : 'Caller'}: ${t.text}`) };
 }
 

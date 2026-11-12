@@ -154,8 +154,16 @@ export function spread<T extends { staff_id: string; startMs: number }>(xs: T[],
 }
 
 // Holds ---------------------------------------------------------------------------------------------------
-export function confirmationText(lang: 'th' | 'en', a: { variant: Variant; staff: { th: string; en: string }; date: LocalDate; t: LocalTime; name?: string | null }) {
+export function confirmationText(lang: 'th' | 'en', a: { variant: Variant; staff: { th: string; en: string }; date: LocalDate; t: LocalTime; name?: string | null;
+  from?: { date: LocalDate; t: LocalTime } }) {
   const when = renderDateTime(a.date, a.t, lang);
+  // A move names both times and asks to move, so a caller never hears "book it" for what is a reschedule (found in a
+  // model-driven run, 12 Nov 2026: the yes to "ยืนยันจองเลยไหมคะ" read like a second booking).
+  if (a.from) {
+    const was = renderDateTime(a.from.date, a.from.t, lang);
+    if (lang === 'th') return `ขอทวนนะคะ: เลื่อนนัด${a.variant.name} จาก${was} เป็น${when} กับคุณ${a.staff.th} ยืนยันเลื่อนนัดเลยไหมคะ`;
+    return `To confirm: moving your ${a.variant.name_en ?? a.variant.name} from ${was} to ${when} with ${a.staff.en}. Shall I move it?`;
+  }
   const price = a.variant.price_is_authoritative && a.variant.price_minor
     ? (lang === 'th' ? ` ราคา ${Number(a.variant.price_minor) / 100} บาท` : ` for ${Number(a.variant.price_minor) / 100} baht`) : '';
   if (lang === 'th') return `ขอทวนนะคะ: ${a.variant.name} กับคุณ${a.staff.th} ${when}${price}${a.name ? ` ในชื่อคุณ${a.name.replace(/^คุณ\s*/, '')}` : ''} ยืนยันจองเลยไหมคะ`;
@@ -220,8 +228,13 @@ export async function holdSlot(tx: Tx, tenantId: string, a: { slotToken: string;
   const start = p.st + v.buffer_before_min * 60_000;
   const lp = localParts(start, loc.time_zone);
   const date = { y: lp.y, m: lp.m, d: lp.d }, t = { h: lp.h, mi: lp.mi };
-  const th = confirmationText('th', { variant: v, staff, date, t, name: a.clientName });
-  const en = confirmationText('en', { variant: v, staff, date, t, name: a.clientName });
+  let from: { date: LocalDate; t: LocalTime } | undefined;
+  if (a.replacesAppointment) {
+    const old = (await tx.query(`select starts_at from appointments where id = $1`, [a.replacesAppointment])).rows[0];
+    if (old) { const o = localParts(new Date(old.starts_at).getTime(), loc.time_zone); from = { date: { y: o.y, m: o.m, d: o.d }, t: { h: o.h, mi: o.mi } }; }
+  }
+  const th = confirmationText('th', { variant: v, staff, date, t, name: a.clientName, from });
+  const en = confirmationText('en', { variant: v, staff, date, t, name: a.clientName, from });
   await tx.query(
     `insert into holds (tenant_id, hold_ref, conversation_id, variant_id, staff_id, starts_at, ends_at, claim_span, client_name,
        rendered_th, rendered_en, rendered_sha256, expires_at, status, replaces_appointment)
