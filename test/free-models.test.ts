@@ -375,3 +375,50 @@ test('a words-only reply that claims something was done is never read out', asyn
   assert.equal(rec.events.at(-1), 'claim_without_tool');
   assert.ok(!call.turns.some(t => t.text.includes('บันทึกคำถาม')));
 });
+
+test('promisesTransfer: promises (from real Gemma replies) caught; offers and refusals kept', async () => {
+  const { promisesTransfer } = await import('../sim/model/receptionist.ts');
+  for (const t of ['ได้ค่ะ รอสักครู่นะคะ เดี๋ยวจะต่อสายให้เจ้าหน้าที่ตรวจสอบข้อมูลการจองให้ค่ะ', 'รับทราบค่ะ คุณบี เดี๋ยวรอสักครู่นะคะกำลังดำเนินการต่อสายให้ค่ะ',
+    'ขออภัยด้วยนะคะ เดี๋ยวขออนุญาตโอนสายไปยังเจ้าหน้าที่ให้สักครู่นะคะ', "I'll put you through to the team now.", 'Let me transfer you.', 'Connecting you now.'])
+    assert.ok(promisesTransfer(t), `promise: ${t}`);
+  for (const t of ['ต้องการให้ดิฉันต่อสายให้เจ้าหน้าที่ไหมคะ', 'ให้ดิฉันโอนสายให้หรือเปล่าคะ', 'ขออภัยค่ะ ไม่สามารถโอนสายให้ได้ในขณะนี้ค่ะ', 'ตอนนี้ยังต่อสายให้ไม่ได้ค่ะ',
+    'ขออภัยค่ะ ขณะนี้เจ้าหน้าที่ไม่ว่างรับสาย มีอะไรให้ดิฉันช่วยไหมคะ', 'หรือต้องการให้รีบต่อสายหาพนักงานเพื่อความช่วยเหลือด่วนไหมคะ?', 'Would you like me to transfer you?', "I can't transfer you right now.", 'Which day suits you?'])
+    assert.ok(!promisesTransfer(t), `not a promise: ${t}`);
+});
+
+test('a promised transfer that was not made: asked again with a note, then the runtime tells the truth', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  // Corrected on the re-ask: it calls the tool (nobody is available at Gate A) and answers honestly.
+  let step = 0;
+  brain = msgs => {
+    step++;
+    const last = msgs.at(-1);
+    if (step === 1) return text('เดี๋ยวจะต่อสายให้เจ้าหน้าที่นะคะ');
+    if (step === 2) return tool('request_human_transfer', { reason: 'caller_asked', topic: 'เลื่อนนัด' });
+    return text(last.role === 'tool' && JSON.parse(last.content).ok === false ? 'ขออภัยค่ะ ขณะนี้เจ้าหน้าที่ไม่ว่างรับสาย ให้ดิฉันช่วยเลื่อนนัดให้ไหมคะ' : 'ค่ะ');
+  };
+  bodies.length = 0;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('ขอสายพนักงานหน่อยค่ะ'), 'ขออภัยค่ะ ขณะนี้เจ้าหน้าที่ไม่ว่างรับสาย ให้ดิฉันช่วยเลื่อนนัดให้ไหมคะ');
+  assert.deepEqual(rec.events, ['transfer_promise_without_tool']);
+  assert.match(bodies[1].body.messages[0].content, /no transfer was made/);
+  assert.ok(bodies[1].body.tools?.length, 'the re-ask keeps the tools so the transfer can really be asked for');
+  // Not corrected: the runtime says it.
+  brain = () => text('กำลังดำเนินการต่อสายให้ค่ะ');
+  assert.match(await rec.respond('ขอคุยกับคนค่ะ'), /^ขออภัยค่ะ ตอนนี้ดิฉันยังต่อสายให้เจ้าหน้าที่ไม่ได้ค่ะ/);
+  assert.ok(!call.turns.some(t => t.who === 'ai' && /เดี๋ยวจะต่อสาย|กำลังดำเนินการต่อสาย/.test(t.text)));
+});
+
+test('after a bridged transfer, saying so is the truth', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = () => ++step === 1 ? tool('request_human_transfer', { reason: 'caller_asked', topic: 'คุยกับพนักงาน' }) : text('ต่อสายให้เจ้าหน้าที่แล้วค่ะ');
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  rec.transferSim = { eligible: true, answered: true, dtmf: '1' };
+  assert.equal(await rec.respond('ขอสายพนักงานค่ะ'), 'ต่อสายให้เจ้าหน้าที่แล้วค่ะ');
+  assert.deepEqual(rec.events, []);
+});

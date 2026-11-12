@@ -25,6 +25,28 @@ const claimsAction = (raw: string) => {
 };
 /** A stand-in for a name the caller never gave ("คุณลูกค้า", "customer"): seen from Gemma 4 12B, 12 Nov 2026. */
 const PLACEHOLDER_NAME = /^(คุณ)?\s*(ลูกค้า|ผู้จอง|ผู้โทร|ไม่ทราบ(ชื่อ)?|ไม่ระบุ|-+)\s*$|^(the\s+)?(customer|caller|client|guest|user|unknown|n\/?a|name)$/i;
+/**
+ * Words that tell the caller they are being put through to a person ("เดี๋ยวจะต่อสายให้เจ้าหน้าที่", "I'll transfer you"):
+ * not an offer ("…ต่อสายให้ไหมคะ", "Would you like me to transfer you?") and not a refusal ("ไม่สามารถโอนสายได้",
+ * "ยังต่อสายให้ไม่ได้", "I can't transfer you"). Gemma 4 12B promised transfers it never asked for (12–13 Nov 2026).
+ */
+export function promisesTransfer(raw: string): boolean {
+  const th = raw
+    .replace(/(ไม่สามารถ|ไม่ได้|ยังไม่|ไม่)\S{0,12}?(ต่อสาย|โอนสาย)/g, '')
+    .replace(/(ต่อสาย|โอนสาย)\S{0,30}?ไม่ได้/g, '');
+  // Thai clauses are separated by spaces: one that asks ("…ไหมคะ?", "ต้องการให้…") is an offer, any other is a promise.
+  const offer = (c: string) => /(ไหม|มั้ย|หรือไม่|หรือเปล่า)(คะ|ครับ|ค่ะ)?\?*$|\?$/.test(c) || /^(หรือ)?(ต้องการ|อยาก)ให้/.test(c);
+  if (th.split(/\s+/).some(c => /ต่อสาย|โอนสาย/.test(c) && !offer(c))) return true;
+  return raw.split(/(?<=[.!?])\s+/).some(s => !/\?\s*$/.test(s) && !/\b(can'?t|cannot|unable|not able|won'?t be able)\b/i.test(s) &&
+    /\b(I('ll| will| am going to|'m going to| am)|let me|I'm)\s+(now\s+)?(transfer(ring)?|put(ting)?|connect(ing)?) you\b|\b(transferring|putting|connecting) you (now|through|to)\b/i.test(s));
+}
+
+/** Added to the instructions after a reply promised a transfer that was never made. */
+const NO_TRANSFER_MADE = `
+
+Your last reply told the caller you were putting them through to a person, but no transfer was made. If the caller
+wants a person, call request_human_transfer and go by its result. Otherwise do not say that you are transferring them.`;
+
 const nameProblems = (tool: string, a: any) => ["hold_slot", "create_booking", "log_booking_request"].includes(tool) && typeof a.client_name === "string" && PLACEHOLDER_NAME.test(a.client_name.trim())
   ? [`arguments.client_name "${a.client_name}" is not a name the caller gave: ask for their name, or leave it out`] : [];
 
@@ -111,8 +133,12 @@ export class Receptionist {
   private versions = new Map<string, number>();
   private refs = new Handles();
   private emergencyLine: string | undefined;
+  /** A transfer the gateway reported as bridged (only DTMF "1" from staff counts, INV-09). */
+  private bridged = false;
 
   private client: ModelClient; private call: Call; private model: string; private business: string; private effort: 'low' | 'medium';
+  /** What the simulated transfer does (Gate A model runs: nobody is available; tests may bridge one). */
+  transferSim: { eligible: boolean; answered: boolean; dtmf: string | null } = { eligible: false, answered: false, dtmf: null };
   constructor(client: ModelClient, call: Call, model: string, business: string, effort: 'low' | 'medium' = 'low') {
     this.client = client; this.call = call; this.model = model; this.business = business; this.effort = effort;
   }
@@ -155,12 +181,12 @@ export class Receptionist {
     const em = await this.call.listen(callerText);
     if (em) { this.events.push('emergency_rule'); this.emergencyLine = this.call.turns.at(-1)!.text; return this.emergencyLine; }
     this.messages.push({ role: 'user', content: callerText });
-    let writeFailed = false, wordsOnly = false, wasWordsOnly = false, retries = 0;
+    let writeFailed = false, wordsOnly = false, wasWordsOnly = false, retries = 0, transferNote = false, transferCorrected = false;
     for (let step = 0; step < 8; step++) {
       const r = await this.create({
         model: this.model, max_tokens: 4000, cache_control: { type: 'ephemeral' },
         output_config: { effort: this.effort },
-        system: systemPrompt(this.business, this.call.lang) + (wordsOnly ? WORDS_ONLY : ''),
+        system: systemPrompt(this.business, this.call.lang) + (wordsOnly ? WORDS_ONLY : '') + (transferNote ? NO_TRANSFER_MADE : ''),
         tools: this.tools(), ...(wordsOnly ? { tool_choice: { type: 'none' } } : {}), messages: this.messages,
       });
       wasWordsOnly = wordsOnly; wordsOnly = false;
@@ -200,6 +226,15 @@ export class Receptionist {
           // Never read markup or silence to a caller (seen with open models that write a tool call as text).
           this.events.push(!text ? 'empty_reply' : saysLabel(text) && !machineLike(text) ? 'label_spoken_rejected' : 'machine_text_rejected'); if (text) this.discarded.push(text.slice(0, 300));
           return this.fallback(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
+        }
+        if (!this.bridged && promisesTransfer(text)) {
+          // A transfer said but not made: the caller would wait for a person who never comes. Ask once more with a
+          // note; if it says so again, the runtime tells the caller the truth.
+          this.events.push('transfer_promise_without_tool'); this.discarded.push(text.slice(0, 300));
+          if (!transferCorrected) { transferCorrected = true; transferNote = true; this.messages.pop(); continue; }
+          return this.fallback(this.call.lang === 'th'
+            ? 'ขออภัยค่ะ ตอนนี้ดิฉันยังต่อสายให้เจ้าหน้าที่ไม่ได้ค่ะ ดิฉันช่วยเรื่องนี้ต่อได้ หรือฝากเรื่องให้ทีมงานติดต่อกลับได้ค่ะ'
+            : "I'm sorry, I can't put you through to a person right now. I can keep helping with this, or pass a message to the team.");
         }
         if (!grounded(text, this.call.corpus)) {
           this.events.push('grounding_rejected');
@@ -281,7 +316,9 @@ export class Receptionist {
     }
     if (name === 'request_human_transfer') {
       // Gate A: no person is ever available in model-driven runs (no telephony), so the text path is offered.
-      return { result: await this.call.tool(name, input, { transfer_sim: { eligible: false, answered: false, dtmf: null } }) };
+      const r = await this.call.tool(name, input, { transfer_sim: this.transferSim });
+      if (r.ok && r.data?.outcome === 'bridged') this.bridged = true;
+      return { result: r };
     }
     const r = await this.call.tool(name, input);
     if (name === 'get_bookings_for_caller' && r.ok) for (const b of r.data.bookings ?? []) this.versions.set(b.booking_ref, b.version);
