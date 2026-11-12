@@ -17,6 +17,9 @@ Free route, on the owner's "Yes, build it" and "Yes, download it". Receptionist 
 | Fifth full run | `8ea5030` (promised transfers caught) | 14/16 | 8.9 s | M02: an unknown service read as "nothing free"; M03: a question promised, never sent |
 | Sixth full run | `3ea4a51` (relay promises, NOT_FOUND names the service) | 15/16 | 7.9 s | the failure was the caller model hanging up on a question; M02 then 3/3 with the caller rule |
 | **Seventh full run** | **`c257179`** (a text only on the caller's yes) | **16/16** | 5.9 s | Gemma set the text flag unasked in 7 of 16 calls (both English bookings whose caller said no text): all blocked, no text sent |
+| Eighth full run | `808b427` (the runtime offers the text) | 13/16 | 5.2 s | offered every time; the simulated callers had hung up in the same breath as their yes |
+| Ninth full run | `8ee122c` (a caller's own request is honoured) | 14/16 | 5.6 s | texts exactly as agreed (2 requested, 1 declined); M06 an unsearched time, M07 a cancel-and-rebook |
+| M07 ×4 | `b091b6d` (no change to a cancelled booking) | 4/4 | 3.6–8.4 s | every move by search → hold → reschedule, each followed by the runtime's offer |
 
 Passing scenarios across both full runs: Thai booking, English booking, unknown question → pending question, prompt
 injection, known FAQ, emergency. Gemma's Thai is natural and polite; it follows the tool flow once the runtime keeps it
@@ -78,11 +81,22 @@ model is told why; "จะส่งข้อความยืนยัน…" w
 callers want no text, now fail if one is queued. In the seventh run Gemma set the flag unasked in 7 of 16 calls and
 **never once asked** the caller: every one was blocked.
 
-### Still open
+### The runtime offers the text (13 Nov 2026, the owner's "Yes, offer it")
 
-- **Nobody asks about the text.** Gemma never offered one, so no caller got a confirmation text even when they would
-  have liked one (M01's caller would have said yes). Whether the runtime should ask itself, as a fixed sentence after a
-  booking, is a product decision.
+After a booking or a move with no text sent, if the number can take one (`can_text`: a valid mobile, a sender, no STOP)
+and the caller has not said no, the runtime ends the turn with its own question ("จองเรียบร้อยแล้วค่ะ ต้องการรับข้อความ
+ยืนยันการจองทางเบอร์ที่โทรมาไหมคะ"). The answer is read by code: yes sends it through the runtime-only `send_booking_text`
+(it needs the caller's yes as evidence, only for their own booking, once; no client name in the text), no settles it,
+anything else goes to the model. A caller who asks for a text in their own words ("ขอข้อความยืนยันทางมือถือด้วยนะคะ")
+gets it without being asked. In the ninth run texts went exactly as agreed: two callers asked and got one, one said
+"No, thank you" and got none, callers who hung up before answering got none.
+
+Found on the way and fixed: "ขอบคุณครับ" would have counted as a yes ("ครับ" contains "รับ"), so yes is read by whole Thai
+words; a move's summary text read "เลื่อนนัด… เลื่อนนัด… ไหมคะ" after the move wording changed; and Gemma once moved a
+booking by cancelling it and rebooking, leaving the caller with nothing when the rebooking failed — a cancelled booking
+can no longer be moved (the error points to a new booking) and the prompt forbids cancel-and-rebook.
+
+### Still open
 
 - **Vaguer promises** such as "เดี๋ยวฉันประสานงานให้" (I'll coordinate it) after a refused transfer are not caught: too
   loose to read reliably.
