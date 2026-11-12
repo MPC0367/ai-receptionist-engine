@@ -31,6 +31,7 @@ export type CompatOptions = {
   provider: Provider; baseURL?: string; apiKey?: string;
   numCtx?: number;            // Ollama only (default 16384)
   think?: string;             // Ollama only: 'on' | 'off' | a level (gpt-oss: low/medium/high); unset = off where the model can think (gpt-oss: low)
+  temperature?: number;       // unset = the model's own default (Gemma 4: 1.0)
   minIntervalMs?: number; timeoutMs?: number; maxRetries?: number;
   fetch?: typeof fetch;       // tests
   sleep?: (ms: number) => Promise<void>;
@@ -41,6 +42,7 @@ export type CompatStats = { requests: number; retries: number; unparseableArgs: 
 /** Raised when the provider keeps refusing for rate or quota reasons: the runner stops and keeps what finished. */
 export class QuotaError extends Error {}
 
+export const NO_THINK_CAP = 200;
 const THINK = /<think>[\s\S]*?(<\/think>|$)/g;
 const TOOL_AS_TEXT = /<tool_call>|<\|tool_call|^\s*\{\s*"(name|function|tool)"\s*:/;
 
@@ -56,7 +58,7 @@ function schemaFor(schema: any, strip: boolean): any {
 }
 
 /** Anthropic-shaped request → OpenAI chat-completions body. */
-export function toOpenAI(p: any, preset: Pick<Preset, 'reasoning' | 'stripAdditional'>) {
+export function toOpenAI(p: any, preset: Pick<Preset, 'reasoning' | 'stripAdditional'>, temperature?: number) {
   const messages: any[] = [];
   if (p.system) messages.push({ role: 'system', content: typeof p.system === 'string' ? p.system : textOf(p.system) });
   for (const m of p.messages) {
@@ -72,12 +74,14 @@ export function toOpenAI(p: any, preset: Pick<Preset, 'reasoning' | 'stripAdditi
   }
   const body: any = { model: p.model, messages, max_tokens: p.max_tokens, stream: false };
   if (p.tools?.length) body.tools = p.tools.map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: schemaFor(t.input_schema, preset.stripAdditional) } }));
+  if (p.tool_choice?.type === 'none' && body.tools) body.tool_choice = 'none';
   if (preset.reasoning && p.output_config?.effort) body.reasoning_effort = p.output_config.effort;
+  if (temperature !== undefined) body.temperature = temperature;
   return body;
 }
 
 /** Anthropic-shaped request → Ollama /api/chat body (arguments as objects, no call ids: results follow call order). */
-export function toOllama(p: any, o: Pick<CompatOptions, 'numCtx' | 'think'>) {
+export function toOllama(p: any, o: Pick<CompatOptions, 'numCtx' | 'think' | 'temperature'>) {
   const messages: any[] = [];
   if (p.system) messages.push({ role: 'system', content: typeof p.system === 'string' ? p.system : textOf(p.system) });
   for (const m of p.messages) {
@@ -94,10 +98,13 @@ export function toOllama(p: any, o: Pick<CompatOptions, 'numCtx' | 'think'>) {
   const thinking = !!o.think && o.think !== 'off';
   // Thinking tokens count against num_predict: with thinking on, the answer gets its own room on top (Gemma 4 12B spent
   // the caller's whole 400 on thinking and said nothing, 12 Nov 2026).
-  // Without thinking a reply is a sentence or a tool call: 1,024 bounds a runaway (one ran to 4,000 tokens, ~1 min).
-  const body: any = { model: p.model, messages, stream: false, options: { num_ctx: o.numCtx ?? 16_384, num_predict: thinking ? p.max_tokens + 8_192 : Math.min(p.max_tokens, 1_024) } };
-  if (p.tools?.length) body.tools = p.tools.map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+  // Without thinking a reply is a sentence or a tool call: Gemma 4 12B's ran 16–62 tokens, so 200 bounds a runaway
+  // (one that never finishes a tool call) at a few seconds instead of a minute.
+  const body: any = { model: p.model, messages, stream: false, options: { num_ctx: o.numCtx ?? 16_384, num_predict: thinking ? p.max_tokens + 8_192 : Math.min(p.max_tokens, NO_THINK_CAP) } };
+  // Ollama has no tool_choice: "none" is honoured by not offering the tools at all.
+  if (p.tools?.length && p.tool_choice?.type !== 'none') body.tools = p.tools.map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
   if (o.think) body.think = o.think === 'on' ? true : o.think === 'off' ? false : o.think;
+  if (o.temperature !== undefined) body.options.temperature = o.temperature;
   return body;
 }
 
@@ -209,7 +216,7 @@ export class CompatClient implements ModelClient {
   async create(p: any) {
     const ollama = this.preset.transport === 'ollama';
     const url = ollama ? `${this.base}/api/chat` : `${this.base}/chat/completions`;
-    const body = JSON.stringify(ollama ? toOllama(p, { numCtx: this.o.numCtx, think: await this.thinkFor(p.model) }) : toOpenAI(p, this.preset));
+    const body = JSON.stringify(ollama ? toOllama(p, { numCtx: this.o.numCtx, think: await this.thinkFor(p.model), temperature: this.o.temperature }) : toOpenAI(p, this.preset, this.o.temperature));
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.key) headers.authorization = `Bearer ${this.key}`;
     const f = this.o.fetch ?? fetch, max = this.o.maxRetries ?? 5;

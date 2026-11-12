@@ -46,6 +46,13 @@ Rules (the runtime enforces them; breaking one discards your reply):
 
 type Turn = { role: 'user' | 'assistant'; content: any };
 
+/** Added to the instructions for the one retry after a broken reply: no tools, so no claims a tool would back. */
+const WORDS_ONLY = `
+
+For this one reply you cannot use tools: answer in words only. Do not say that you have checked, booked, moved,
+cancelled, recorded, sent or transferred anything, or that you are about to; ask the caller what you need, or tell them
+what you can do next.`;
+
 /**
  * The model never sees a real reference. Slot tokens (signed, ~300 characters), hold and booking ids (UUIDs) are
  * shown to it as short labels — S1, H1, B1 — and turned back into the real values before the gateway sees them;
@@ -142,19 +149,28 @@ export class Receptionist {
     const em = await this.call.listen(callerText);
     if (em) { this.events.push('emergency_rule'); this.emergencyLine = this.call.turns.at(-1)!.text; return this.emergencyLine; }
     this.messages.push({ role: 'user', content: callerText });
-    let writeFailed = false;
+    let writeFailed = false, wordsOnly = false, retried = false;
     for (let step = 0; step < 8; step++) {
       const r = await this.create({
         model: this.model, max_tokens: 4000, cache_control: { type: 'ephemeral' },
         output_config: { effort: this.effort },
-        system: systemPrompt(this.business, this.call.lang),
-        tools: this.tools(), messages: this.messages,
+        system: systemPrompt(this.business, this.call.lang) + (wordsOnly ? WORDS_ONLY : ''),
+        tools: this.tools(), ...(wordsOnly ? { tool_choice: { type: 'none' } } : {}), messages: this.messages,
       });
+      wordsOnly = false;
       this.messages.push({ role: 'assistant', content: r.content });
       if (r.stop_reason === 'refusal') { this.events.push('refusal'); return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ เรื่องนี้ดิฉันช่วยไม่ได้ค่ะ' : "I'm sorry, I can't help with that."); }
       const uses = r.content.filter((b: any) => b.type === 'tool_use');
       if (!uses.length) {
         const text = r.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ').trim();
+        const broken = r.stop_reason === 'max_tokens' ? 'reply_cut_off' : !text ? 'empty_reply' : machineLike(text) ? 'machine_text_rejected' : '';
+        if (broken && !retried) {
+          // Ask once more, for words only. Gemma 4 12B sometimes starts a tool call it never finishes and runs to the
+          // token cap with nothing to show; asked again without tools it answered every time (12 Nov 2026).
+          this.events.push(broken, 'retried_words_only'); if (text) this.discarded.push(text.slice(0, 300));
+          this.messages.pop(); retried = true; wordsOnly = true;
+          continue;
+        }
         if (r.stop_reason === 'max_tokens') {
           // A reply cut off at the token limit is never read out (one run on Gemma 4 12B ran on to the limit).
           this.events.push('reply_cut_off'); this.discarded.push(text.slice(0, 300));

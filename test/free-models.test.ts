@@ -9,10 +9,10 @@ import { createServer, type Server } from 'node:http';
 import { A, NUM, Call, CALLER, closeDb, fresh, withTenant } from './helpers.ts';
 import { Receptionist } from '../sim/model/receptionist.ts';
 import { checkArgs, TOOL_SPECS } from '../sim/model/tools.ts';
-import { CompatClient, PROVIDERS, QuotaError, fromOpenAI, toOpenAI, type CompatStats } from '../sim/model/free-models.ts';
+import { CompatClient, NO_THINK_CAP, PROVIDERS, QuotaError, fromOpenAI, toOpenAI, type CompatStats } from '../sim/model/free-models.ts';
 import { cost } from '../sim/model/run.ts';
 
-type Reply = { text?: string; tool?: { name: string; args: unknown } } | { status: number; retryAfter?: string };
+type Reply = { text?: string; tool?: { name: string; args: unknown }; cut?: boolean } | { status: number; retryAfter?: string };
 type Brain = (msgs: any[]) => Reply;
 
 let server: Server, port = 0, brain: Brain = () => ({ text: 'ค่ะ' });
@@ -32,7 +32,7 @@ before(async () => {
       const r = brain(body.messages);
       if ('status' in r) return send(r.status, { error: 'slow down' }, r.retryAfter ? { 'retry-after': r.retryAfter } : {});
       if (req.url === '/api/chat') {
-        return send(200, { model: body.model, done: true, done_reason: 'stop', prompt_eval_count: 1200, prompt_eval_cached_count: 1000, eval_count: 30,
+        return send(200, { model: body.model, done: true, done_reason: r.cut ? 'length' : 'stop', prompt_eval_count: 1200, prompt_eval_cached_count: 1000, eval_count: 30,
           message: { role: 'assistant', content: r.text ?? '', thinking: 'private reasoning', ...(r.tool ? { tool_calls: [{ function: { name: r.tool.name, arguments: r.tool.args } }] } : {}) } });
       }
       return send(200, { id: `cmpl_${++n}`, choices: [{ index: 0, finish_reason: r.tool ? 'tool_calls' : 'stop',
@@ -166,8 +166,8 @@ test('markup or silence is never read to a caller', async () => {
   assert.equal(await rec.respond('มีที่จอดรถไหมคะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
   brain = () => text('');
   assert.equal(await rec.respond('ฮัลโหลค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
-  assert.deepEqual(rec.events, ['machine_text_rejected', 'empty_reply']);
-  assert.equal(client.stats.toolCallsAsText, 1);
+  assert.deepEqual(rec.events, ['machine_text_rejected', 'retried_words_only', 'machine_text_rejected', 'empty_reply', 'retried_words_only', 'empty_reply'], 'one words-only retry each, then the runtime line');
+  assert.equal(client.stats.toolCallsAsText, 2);
   assert.ok(!call.turns.some(t => t.text.includes('tool_call')));
 });
 
@@ -246,7 +246,7 @@ test('thinking is off by default where a model can think; asked for, it gets roo
   await off.messages.create({ model: 'thinker', max_tokens: 400, messages: [{ role: 'user', content: 'x' }] });
   await off.messages.create({ model: 'stand-in', max_tokens: 400, messages: [{ role: 'user', content: 'x' }] });
   assert.equal(bodies[0].body.think, false);
-  assert.equal(bodies[0].body.options.num_predict, 400);
+  assert.equal(bodies[0].body.options.num_predict, NO_THINK_CAP);
   assert.ok(!('think' in bodies[1].body), 'a model that cannot think is sent nothing');
   const on = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}`, think: 'on' });
   await on.messages.create({ model: 'thinker', max_tokens: 400, messages: [{ role: 'user', content: 'x' }] });
@@ -317,7 +317,7 @@ test('a reply cut off at the token limit is never read out', async () => {
   const cut = { messages: { create: async () => fromOpenAI({ choices: [{ finish_reason: 'length', message: { content: 'ค่ะ ค่ะ ค่ะ ค่ะ' } }] }, stats) } };
   const rec = new Receptionist(cut, call, 'stand-in', 'ร้านสปาตัวอย่าง');
   assert.equal(await rec.respond('สวัสดีค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
-  assert.deepEqual(rec.events, ['reply_cut_off']);
+  assert.deepEqual(rec.events, ['reply_cut_off', 'retried_words_only', 'reply_cut_off']);
 });
 
 test('an emergency stays an emergency: "still not conscious" triggers the rule, and a discarded reply repeats 1669', async () => {
@@ -342,4 +342,23 @@ test('an internal label is never said to the caller', async () => {
   assert.equal(await rec.respond('ขอเลื่อนนัดค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
   assert.deepEqual(rec.events, ['label_spoken_rejected']);
   assert.ok(!call.turns.some(t => t.text.includes('B1')));
+});
+
+test('a runaway reply is asked again once, for words only: no tools offered, no claims a tool would back', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = () => ++step === 1 ? { text: '', cut: true } : text('ขออภัยค่ะ ไม่ทราบว่าต้องการเลื่อนเป็นวันไหนคะ');
+  bodies.length = 0;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('ขอเลื่อนนัดค่ะ'), 'ขออภัยค่ะ ไม่ทราบว่าต้องการเลื่อนเป็นวันไหนคะ');
+  assert.deepEqual(rec.events, ['reply_cut_off', 'retried_words_only']);
+  assert.ok(bodies[0].body.tools?.length, 'the first ask has tools');
+  assert.ok(!('tools' in bodies[1].body), 'the retry has none');
+  assert.match(bodies[1].body.messages[0].content, /you cannot use tools/);
+  assert.ok(!bodies[1].body.messages.some((m: any) => m.role === 'assistant' && m.content === ''), 'the broken reply is not left in the history');
+  assert.ok(!rec.messages.some((m: any) => Array.isArray(m.content) && m.content.length === 0));
+  const next = toOpenAI({ model: 'm', max_tokens: 10, tools: TOOL_SPECS, tool_choice: { type: 'none' }, messages: [{ role: 'user', content: 'x' }] }, PROVIDERS.cerebras);
+  assert.equal(next.tool_choice, 'none', 'OpenAI-compatible hosts get tool_choice none');
 });
