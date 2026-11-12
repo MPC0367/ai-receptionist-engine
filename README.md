@@ -9,7 +9,7 @@ first with LINE as the owner channel, massage / day spa, LiveKit Agents as the f
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 99 tests (resets the rcpt_test database per test)
+npm test              # 103 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -85,6 +85,9 @@ npm run model:run -- --provider gemini --models gemini-3.8-flash --yes    # GEMI
   it on and gives the answer its own room on top of `max_tokens`.
 - A broken reply (cut off, empty, markup) is asked again with the tools, then once for words only; a words-only reply
   that claims an action is thrown away. Ollama caps a reply at 200 tokens without thinking. `--temperature` sets it.
+- A confirmation text goes only with the runtime's evidence that the caller said yes to a texting question
+  (`text_consent_turn`); the model's `send_confirmation_text` alone books without a text. Promises the tools did not
+  back (a transfer, a question sent, a text) are asked again once, then corrected by the runtime.
 - `--only M01-book-thai,M04-emergency` runs chosen scenarios (a timing check first); results carry each run's tool log.
 - Gemini's free tier uses prompts to improve Google's products: fictional data only, as here.
 - What these runs cannot say: how Claude would do. No prompt caching, server-side fallback or strict tool use on this
