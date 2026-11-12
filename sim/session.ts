@@ -22,6 +22,7 @@ export const T = {
     : `Hi, you've reached ${name}. I'm the business's AI assistant.${recording ? ' This call may be recorded to help with your booking.' : ''}`,
   unknown: (lang: 'th' | 'en') => lang === 'th' ? 'ดิฉันยังไม่มีคำตอบที่ยืนยันได้สำหรับเรื่องนี้ และไม่อยากเดาค่ะ' : "I don't have a confirmed answer to that, and I don't want to guess.",
   slotTaken: (lang: 'th' | 'en') => lang === 'th' ? 'ขออภัยค่ะ เวลานั้นเพิ่งมีคนจองไป' : 'That time was just taken.',
+  textQuestion: (lang: 'th' | 'en') => lang === 'th' ? 'ต้องการรับข้อความยืนยันการจองทางเบอร์นี้ไหมคะ' : 'Would you like a text confirming the booking at this number?',
 };
 
 export class Call {
@@ -117,8 +118,10 @@ export class Call {
     const spokenTurn = this.say(this.lang === 'th' ? rendered.th : rendered.en);
     const confirmTurn = o.earlyYes ? yesEarly! : this.hear(o.affirm === false ? 'อืม' : 'ใช่ค่ะ');
     if (o.affirm === false) { await this.tool('release_hold', { hold_ref: h.data.hold_ref }); return { stage: 'declined', hold: h }; }
+    let textYes: number | undefined;
+    if (o.textConfirmation) { this.say(T.textQuestion(this.lang)); textYes = this.hear('ได้ค่ะ'); }
     const b = await this.tool('create_booking', { hold_ref: h.data.hold_ref, client_name: o.name, send_confirmation_text: !!o.textConfirmation },
-      { spoken_confirmation_sha256: sha(rendered.th + '\n' + rendered.en), spoken_turn: spokenTurn, confirm_turn: confirmTurn });
+      { spoken_confirmation_sha256: sha(rendered.th + '\n' + rendered.en), spoken_turn: spokenTurn, confirm_turn: confirmTurn, text_consent_turn: textYes });
     if (b.ok) { this.say(this.lang === 'th' ? b.data.rendered_summary.th : b.data.rendered_summary.en); this.outcomes.push('booked'); }
     return { stage: 'create', result: b, hold: h, search: s, option: opt };
   }

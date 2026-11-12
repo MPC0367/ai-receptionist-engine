@@ -6,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { A, NUM, Call, CALLER, closeDb, fresh, withTenant } from './helpers.ts';
+import { A, NUM, Call, CALLER, closeDb, fresh, sha, withTenant } from './helpers.ts';
 import { Receptionist } from '../sim/model/receptionist.ts';
 import { checkArgs, TOOL_SPECS } from '../sim/model/tools.ts';
 import { CompatClient, NO_THINK_CAP, PROVIDERS, QuotaError, fromOpenAI, toOpenAI, type CompatStats } from '../sim/model/free-models.ts';
@@ -463,4 +463,87 @@ test('an unknown service name says it is the service, with the menu — not "no 
   assert.equal(r.error.detail.not_found, 'service');
   assert.ok(r.error.detail.menu.includes('นวดเท้า 45 นาที'));
   assert.match(r.error.detail.note, /not about free times/);
+});
+
+test('texting words: the question, the answer and the promise', async () => {
+  const { asksAboutText, yesNo, promisesText } = await import('../sim/model/receptionist.ts');
+  assert.ok(asksAboutText('ต้องการรับข้อความยืนยันการจองทางเบอร์นี้ไหมคะ'));
+  assert.ok(asksAboutText('Would you like a text confirming the booking?'));
+  assert.ok(!asksAboutText('ให้ดิฉันส่งคำถามนี้ให้ทีมงานแจ้งกลับทางข้อความไหมคะ'), 'texting about a question is not a booking confirmation');
+  assert.ok(!asksAboutText('จองเรียบร้อยแล้วค่ะ'));
+  assert.equal(yesNo('ได้ค่ะ'), 'yes'); assert.equal(yesNo('ค่ะ ส่งมาเลย'), 'yes'); assert.equal(yesNo('Yes, please.'), 'yes');
+  assert.equal(yesNo('ไม่ต้องค่ะ'), 'no'); assert.equal(yesNo('ใช่ค่ะ จองเลย ไม่ต้องส่งข้อความนะคะ'), 'no'); assert.equal(yesNo("No thanks."), 'no');
+  assert.equal(yesNo('วันพรุ่งนี้บ่ายสาม'), null);
+  for (const t of ['จะส่งข้อความยืนยันไปที่เบอร์นี้นะคะ', 'ส่งข้อความยืนยันให้เรียบร้อยแล้วค่ะ', "I'll send you a text confirmation.", 'A confirmation text has been sent.'])
+    assert.ok(promisesText(t), `promise: ${t}`);
+  for (const t of ['ต้องการให้ส่งข้อความยืนยันไหมคะ', 'ครั้งนี้ยังไม่ได้ส่งข้อความยืนยันนะคะ', 'Would you like me to send a text confirmation?', "I won't send a text."])
+    assert.ok(!promisesText(t), `not a promise: ${t}`);
+});
+
+test('gateway: send_confirmation_text without the runtime\'s consent evidence books but sends no text', async () => {
+  const clock = await fresh();
+  const texts = () => withTenant(A, async tx => (await tx.query(`select count(*)::int n from outbox_events where payload->>'to' = $1`, [CALLER])).rows[0].n);
+  for (const evidence of [false, true]) {
+    const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+    const s = await call.tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: evidence ? 'พรุ่งนี้บ่ายสี่โมง' : 'พรุ่งนี้บ่ายสาม' });
+    const h = await call.tool('hold_slot', { slot_token: s.data.options[0].slot_token, client_name: 'อันนา' });
+    const spoken = call.say(h.data.rendered_confirmation.th), yes = call.hear('ใช่ค่ะ');
+    const before = await texts();
+    const b = await call.tool('create_booking', { hold_ref: h.data.hold_ref, client_name: 'อันนา', send_confirmation_text: true },
+      { spoken_confirmation_sha256: sha(h.data.rendered_confirmation.th + '\n' + h.data.rendered_confirmation.en), spoken_turn: spoken, confirm_turn: yes, ...(evidence ? { text_consent_turn: yes } : {}) });
+    assert.ok(b.ok);
+    assert.equal(await texts() - before, evidence ? 1 : 0, evidence ? 'with evidence: one text' : 'the flag alone sends nothing');
+    await call.end();
+  }
+});
+
+/** Books through the stand-in; whether and how the model asks about a text is up to the test. */
+function textBrain(ask: boolean) {
+  return (msgs: any[]): Reply => {
+    const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    const u = [...msgs].reverse().find((m: any) => m.role === 'user')?.content ?? '';
+    if (tr?.data?.options) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'อันนา' });
+    if (tr?.data?.booking_ref) return text(tr.data.confirmation_text?.startsWith('not_sent') ? 'จองเรียบร้อยแล้วค่ะ' : 'จองเรียบร้อยแล้วค่ะ จะส่งข้อความยืนยันไปที่เบอร์นี้นะคะ');
+    if (tr && !tr.ok) return text('ขออภัยค่ะ');
+    const hold = () => msgs.filter((m: any) => m.role === 'tool').map((m: any) => JSON.parse(m.content)).find((x: any) => x.data?.hold_ref)?.data.hold_ref;
+    if (u.startsWith('ใช่')) return ask ? text('ต้องการรับข้อความยืนยันการจองทางเบอร์นี้ไหมคะ') : tool('create_booking', { hold_ref: hold(), client_name: 'อันนา', send_confirmation_text: true });
+    if (/ได้ค่ะ|ไม่ต้อง/.test(u)) return tool('create_booking', { hold_ref: hold(), client_name: 'อันนา', send_confirmation_text: true });
+    if (u.includes('จอง')) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+    return text('ค่ะ');
+  };
+}
+
+test('a text only after the caller says yes to the question; never on the model\'s flag alone', async () => {
+  const texts = () => withTenant(A, async tx => (await tx.query(`select count(*)::int n from outbox_events where payload->>'to' = $1`, [CALLER])).rows[0].n);
+  const run = async (ask: boolean, answer?: string) => {
+    const clock = await fresh();
+    const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+    brain = textBrain(ask);
+    const rec = new Receptionist(new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` }), call, 'stand-in', 'ร้านสปาตัวอย่าง');
+    await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ ชื่ออันนา');
+    let last = await rec.respond('ใช่ค่ะ');
+    if (answer) last = await rec.respond(answer);
+    const booked = await withTenant(A, async tx => (await tx.query(`select count(*)::int n from appointments where status = 'booked'`)).rows[0].n);
+    return { rec, last, booked, texts: await texts() };
+  };
+  const unasked = await run(false);
+  assert.equal(unasked.booked, 1);
+  assert.equal(unasked.texts, 0, 'never asked: no text');
+  assert.ok(unasked.rec.events.includes('text_without_consent'));
+  assert.equal(unasked.last, 'จองเรียบร้อยแล้วค่ะ', 'the model is told no text went, so it does not promise one');
+  const yes = await run(true, 'ได้ค่ะ');
+  assert.equal(yes.texts, 1, 'asked and yes: one text');
+  assert.deepEqual(yes.rec.events, []);
+  const no = await run(true, 'ไม่ต้องค่ะ');
+  assert.equal(no.booked, 1);
+  assert.equal(no.texts, 0, 'asked and no: no text');
+});
+
+test('"a text is on its way" with no text queued is caught', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  brain = () => text('จะส่งข้อความยืนยันไปที่เบอร์นี้นะคะ');
+  const rec = new Receptionist(new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` }), call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('ขอบคุณค่ะ'), 'ขออภัยค่ะ ครั้งนี้ยังไม่ได้ส่งข้อความยืนยันนะคะ');
+  assert.deepEqual(rec.events, ['text_promise_without_consent', 'text_promise_without_consent']);
 });

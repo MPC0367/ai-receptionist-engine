@@ -19,6 +19,8 @@ import { safetyGate, cleanSummary } from '../escalation/safety.ts';
 /** Runtime-supplied facts the model never controls (turn order, spoken text hashes, versions it read earlier). */
 export type Meta = {
   spoken_confirmation_sha256?: string; spoken_turn?: number; confirm_turn?: number; expected_version?: number;
+  /** The caller's turn that said yes to a confirmation text (runtime evidence, never the model's flag alone). */
+  text_consent_turn?: number;
   utterance_turn_ref?: string; recording_offset_ms?: number;
   transfer_sim?: { eligible: boolean; answered: boolean; dtmf: string | null; machine?: boolean };
 };
@@ -216,13 +218,15 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
     case 'create_booking':
       return idempotent(tx, `book:${c.conversation_id}:${a.hold_ref}`, tool, a, async () => {
         const conf = confirmation(m, now);
-        if (a.send_confirmation_text && c.ani) {
+        // A text only with the runtime's evidence of the caller's own yes (Gemma 4 12B set the flag unasked, 12 Nov 2026).
+        const text = !!a.send_confirmation_text && m.text_consent_turn !== undefined && !!c.ani;
+        if (text) {
           const s = await smsSenderOf(tx, c.tenant_id);
-          if (s) await recordConsent(tx, c.tenant_id, { sender: s.sender, target: c.ani, channel: 'sms', purpose: 'transactional', scopeRef: `booking_confirmation:${a.hold_ref}`,
-            evidence: { turn: m.confirm_turn, conversation: c.conversation_id }, now });
+          if (s) await recordConsent(tx, c.tenant_id, { sender: s.sender, target: c.ani!, channel: 'sms', purpose: 'transactional', scopeRef: `booking_confirmation:${a.hold_ref}`,
+            evidence: { turn: m.text_consent_turn, conversation: c.conversation_id }, now });
         }
         return B.createBooking(tx, c.tenant_id, { holdRef: a.hold_ref, clientName: a.client_name, phone: c.ani, conversationId: c.conversation_id, conf, now,
-          configVersion: c.config_version, notify: notifier(c, now, !!a.send_confirmation_text) as any });
+          configVersion: c.config_version, notify: notifier(c, now, text) as any });
       });
 
     case 'get_bookings_for_caller':
@@ -303,11 +307,11 @@ async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, a
 
 /** Record transactional consent when the caller said yes to a text about this change (SM-11); otherwise no text. */
 async function transactionalYes(tx: Tx, c: CallClaims, a: Record<string, any>, m: Meta, scope: string, now: Date): Promise<boolean> {
-  if (!a.send_confirmation_text || !c.ani) return false;
+  if (!a.send_confirmation_text || m.text_consent_turn === undefined || !c.ani) return false;
   const s = await smsSenderOf(tx, c.tenant_id);
   if (!s) return false;
   await recordConsent(tx, c.tenant_id, { sender: s.sender, target: c.ani, channel: 'sms', purpose: 'transactional', scopeRef: scope,
-    evidence: { turn: m.confirm_turn ?? null, conversation: c.conversation_id }, now });
+    evidence: { turn: m.text_consent_turn, conversation: c.conversation_id }, now });
   return true;
 }
 

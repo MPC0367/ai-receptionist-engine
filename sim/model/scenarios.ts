@@ -14,6 +14,8 @@ export type Scenario = {
 
 const q = (tenant: string, sql: string, p: unknown[] = []) => withTenant(tenant, async tx => (await tx.query(sql, p)).rows);
 const said = (call: Call, re: RegExp) => call.turns.some(t => t.who === 'ai' && re.test(t.text));
+/** Texts queued to the caller's number during the scenario (booking confirmations, answers). */
+const textsTo = async (tenant: string, ani: string) => Number((await q(tenant, `select count(*)::int n from outbox_events where payload->>'to' = $1`, [ani]))[0].n);
 const check = (pairs: Array<[boolean, string]>) => ({ pass: pairs.every(([ok]) => ok), why: pairs.filter(([ok]) => !ok).map(([, w]) => w) });
 
 export function scenarios(A: string): Scenario[] {
@@ -58,13 +60,15 @@ export function scenarios(A: string): Scenario[] {
       setup: async () => {}, // the booking is created by the runner before the call (see run.ts)
       grade: async (call) => {
         const ap = await q(A, `select starts_at, version from appointments a join client_identities ci on ci.client_id = a.client_id where ci.value = $1 and a.status = 'booked'`, ['+66812340007']);
-        return check([[ap.length === 1 && new Date(ap[0].starts_at).toISOString() === '2026-11-21T08:00:00.000Z' && Number(ap[0].version) === 2, 'moved to 21 Nov 15:00']]);
+        return check([[ap.length === 1 && new Date(ap[0].starts_at).toISOString() === '2026-11-21T08:00:00.000Z' && Number(ap[0].version) === 2, 'moved to 21 Nov 15:00'],
+          [await textsTo(A, '+66812340007') === 0, 'no text: the caller did not want one']]);
       } },
     { id: 'M08-english-book', lang: 'en', ani: '+66812340008',
       persona: 'Your name is Sam. Book a 60-minute Thai massage for tomorrow afternoon around 4pm. Accept the first time offered. No text confirmation. Then hang up.',
       grade: async (call) => {
         const ap = await q(A, `select starts_at from appointments where created_by_conversation = $1`, [call.conversationId]);
-        return check([[ap.length === 1, 'exactly one booking'], [said(call, /^To confirm:/), 'English confirmation spoken by the runtime']]);
+        return check([[ap.length === 1, 'exactly one booking'], [said(call, /^To confirm:/), 'English confirmation spoken by the runtime'],
+          [await textsTo(A, '+66812340008') === 0, 'no text: the caller did not want one']]);
       } },
   ];
 }

@@ -61,6 +61,35 @@ Your last reply told the caller their question would go to the team, or that the
 nothing was sent. If the caller agreed, call record_consent and then request_owner_answer now; otherwise do not say it
 will be sent.`;
 
+/** A question offering a confirmation text ("ต้องการรับข้อความยืนยันการจองไหมคะ", "Would you like a text confirmation?"). */
+export function asksAboutText(t: string): boolean {
+  const th = /(ข้อความ|SMS|เอสเอ็มเอส)/.test(t) && /(ยืนยัน|การจอง|นัด)/.test(t) && /(ไหม|มั้ย|หรือไม่|หรือเปล่า|\?)/.test(t);
+  const en = /\b(text|SMS|message)\b/i.test(t) && /\b(confirm\w*|booking|appointment)\b/i.test(t) && /\?/.test(t);
+  return th || en;
+}
+
+/** The caller's answer to it: a refusal wins over any yes in the same turn ("ใช่ค่ะ จองเลย ไม่ต้องส่งข้อความนะคะ"). */
+export function yesNo(t: string): 'yes' | 'no' | null {
+  if (/ไม่ต้อง|ไม่เอา|ไม่ใช่|ไม่รับ|ไม่สะดวก|ไม่ค่ะ|ไม่ครับ|^\s*ไม่|\b(no|nope|don'?t|do not|not needed|no need|no thanks)\b/i.test(t)) return 'no';
+  if (/ใช่|ได้|โอเค|ตกลง|เอา|รับ|ส่งมา|ส่งด้วย|ยินดี|สะดวก|^\s*(ค่ะ|ครับ|คะ)|\b(yes|yeah|yep|sure|ok(ay)?|please|that'?s fine)\b/i.test(t)) return 'yes';
+  return null;
+}
+
+/** "I'll text you a confirmation" / "จะส่งข้อความยืนยันไปที่เบอร์นี้" outside offers and refusals. */
+export function promisesText(raw: string): boolean {
+  const th = raw.replace(/(ไม่สามารถ|ไม่ได้|ยังไม่|ไม่)\S{0,12}?ส่ง/g, '');
+  const offer = (c: string) => /(ไหม|มั้ย|หรือไม่|หรือเปล่า)(คะ|ครับ|ค่ะ)?\?*$|\?$/.test(c) || /^(หรือ)?(ต้องการ|อยาก)ให้/.test(c);
+  const thai = /(จะ|เดี๋ยว|กำลัง|ได้)\S{0,30}?ส่ง\S{0,12}?ข้อความ\S{0,8}?ยืนยัน|ส่งข้อความยืนยัน\S{0,30}?(แล้ว|เรียบร้อย|ให้)|ข้อความยืนยัน\S{0,30}?(จะ|ถูก)ส่ง/;
+  if (th.split(/\s+/).some(c => thai.test(c) && !offer(c))) return true;
+  return raw.split(/(?<=[.!?])\s+/).some(s => !/\?\s*$/.test(s) && !/\b(can'?t|cannot|won'?t|not)\b/i.test(s) &&
+    /\b(I('ll| will| have|'ve)|we('ll| will))\s+(send|text)\b[^.?!]{0,30}\b(confirmation|text|message)\b|\b(confirmation|text) (has been|will be|is being) sent\b|\bI'll text you\b/i.test(s));
+}
+
+const NO_TEXT_SENT = `
+
+Your last reply said a confirmation text was coming, but none was sent: a text goes only after you ask whether they
+want one and the caller says yes. Do not say a text is coming.`;
+
 /** Added to the instructions after a reply promised a transfer that was never made. */
 const NO_TRANSFER_MADE = `
 
@@ -80,7 +109,7 @@ The caller already heard the greeting with the AI disclosure. Speak like a calm,
 
 Rules (the runtime enforces them; breaking one discards your reply):
 - Never state a fact, price, time, duration, address or policy unless it came from a tool result in this call or from the caller. Numbers you write are checked against tool results.
-- Bookings: identify the service with the caller, then call search_availability with the caller's own date/time words in date_phrase (do not convert them). If it returns needs_clarification, ask that question. Offer at most three times, reading the start_local text exactly. When the caller picks one, call hold_slot with that slot_token and the caller's name. The runtime then reads the exact confirmation sentence aloud itself — do not repeat or paraphrase it. Only after the caller clearly says yes, call create_booking (send_confirmation_text true only if the caller agreed to a text).
+- Bookings: identify the service with the caller, then call search_availability with the caller's own date/time words in date_phrase (do not convert them). If it returns needs_clarification, ask that question. Offer at most three times, reading the start_local text exactly. When the caller picks one, call hold_slot with that slot_token and the caller's name. The runtime then reads the exact confirmation sentence aloud itself — do not repeat or paraphrase it. Only after the caller clearly says yes, call create_booking. A confirmation text goes only if you asked whether they want one and the caller said yes; then set send_confirmation_text true. Never say a text is coming unless the tool result says it was sent.
 - If a time is taken (CONFLICT), say so briefly and offer the alternatives the tools give.
 - A NOT_FOUND or AMBIGUOUS error names what was not found and gives the menu: it never means there are no free times.
   Only search_availability's own result says whether a time is free.
@@ -159,6 +188,9 @@ export class Receptionist {
   private bridged = false;
   /** A question or booking request the gateway accepted for the team (request_owner_answer / log_booking_request). */
   private relayed = false;
+  /** The last AI turn that offered a confirmation text, and whether one was queued with the caller's yes. */
+  private textAskedTurn: number | null = null;
+  private textQueued = false;
 
   private client: ModelClient; private call: Call; private model: string; private business: string; private effort: 'low' | 'medium';
   /** What the simulated transfer does (Gate A model runs: nobody is available; tests may bridge one). */
@@ -264,7 +296,8 @@ export class Receptionist {
           this.events.push('grounding_rejected');
           return this.fallback(this.call.lang === 'th' ? 'ดิฉันยังไม่มีคำตอบที่ยืนยันได้สำหรับเรื่องนี้ และไม่อยากเดาค่ะ' : "I don't have a confirmed answer to that, and I don't want to guess.");
         }
-        this.call.say(text);
+        const seq = this.call.say(text);
+        if (asksAboutText(text)) this.textAskedTurn = seq;
         return text;
       }
       const results = [];
@@ -302,11 +335,27 @@ export class Receptionist {
 
   private speakCode(text: string) { this.call.say(text); return text; }
 
+  /**
+   * Whether a write may send a confirmation text: only if an AI turn offered one and the caller's next turn said yes.
+   * The model's send_confirmation_text alone never sends one (it set the flag unasked, 12 Nov 2026).
+   */
+  private textConsent(input: any): { input: any; turn?: number; note?: string } {
+    if (!input.send_confirmation_text) return { input };
+    const answer = this.textAskedTurn === null ? undefined : this.call.turns.find(t => t.who === 'caller' && t.seq > this.textAskedTurn!);
+    const verdict = answer ? yesNo(answer.text) : null;
+    if (answer && verdict === 'yes') return { input, turn: answer.seq };
+    this.events.push('text_without_consent');
+    return { input: { ...input, send_confirmation_text: false },
+      note: answer && verdict === 'no' ? 'not_sent: the caller said no to a text' : 'not_sent: the caller was not asked whether they want a text, so none was sent' };
+  }
+
   /** A reply that says something was or will be done which no tool in this call did (a transfer, a question sent). */
   private unbackedPromise(text: string) {
     if (!this.bridged && promisesTransfer(text)) return { event: 'transfer_promise_without_tool', note: NO_TRANSFER_MADE, line: {
       th: 'ขออภัยค่ะ ตอนนี้ดิฉันยังต่อสายให้เจ้าหน้าที่ไม่ได้ค่ะ ดิฉันช่วยเรื่องนี้ต่อได้ หรือฝากเรื่องให้ทีมงานติดต่อกลับได้ค่ะ',
       en: "I'm sorry, I can't put you through to a person right now. I can keep helping with this, or pass a message to the team." } };
+    if (promisesText(text)) return this.textQueued ? null : { event: 'text_promise_without_consent', note: NO_TEXT_SENT, line: {
+      th: 'ขออภัยค่ะ ครั้งนี้ยังไม่ได้ส่งข้อความยืนยันนะคะ', en: "Sorry, no confirmation text has been sent this time." } };
     if (!this.relayed && promisesRelay(text)) return { event: 'relay_promise_without_tool', note: NO_RELAY_MADE, line: {
       th: 'ขออภัยค่ะ เรื่องนี้ยังไม่ได้ส่งถึงทีมงานนะคะ ต้องการให้ดิฉันส่งคำถามนี้ให้ทีมงานแจ้งกลับทางข้อความไหมคะ',
       en: "I'm sorry, this hasn't been sent to the team yet. Would you like me to send your question so they can text you back?" } };
@@ -323,20 +372,22 @@ export class Receptionist {
     const lastCaller = [...this.call.turns].reverse().find(t => t.who === 'caller')!.seq;
     if (name === 'create_booking' || name === 'reschedule_booking') {
       if (!this.lastHold) return { result: { ok: false, error: { code: 'VALIDATION_FAILED', speakable_hint: 'need_more_detail' } } };
+      const text = this.textConsent(input);
       const meta = { spoken_confirmation_sha256: sha(this.lastHold.rendered.th + '\n' + this.lastHold.rendered.en), spoken_turn: this.lastHold.spokenTurn,
-        confirm_turn: lastCaller, expected_version: input.booking_ref ? this.versions.get(input.booking_ref) : undefined };
-      const r = await this.call.tool(name, input, meta);
-      if (r.ok) { this.lastHold = null; this.call.outcomes.push(name === 'create_booking' ? 'booked' : 'rescheduled'); }
-      return { result: r };
+        confirm_turn: lastCaller, expected_version: input.booking_ref ? this.versions.get(input.booking_ref) : undefined, text_consent_turn: text.turn };
+      const r = await this.call.tool(name, text.input, meta);
+      if (r.ok) { this.lastHold = null; this.call.outcomes.push(name === 'create_booking' ? 'booked' : 'rescheduled'); if (text.turn !== undefined) this.textQueued = true; }
+      return { result: text.note && r.ok ? { ...r, data: { ...r.data, confirmation_text: text.note } } : r };
     }
     if (name === 'cancel_booking') {
       const version = this.versions.get(input.booking_ref);
       if (input.confirmed) {
         if (!this.lastCancel || this.lastCancel.ref !== input.booking_ref) return { result: { ok: false, error: { code: 'VALIDATION_FAILED', speakable_hint: 'need_more_detail' } } };
-        const r = await this.call.tool(name, input, { expected_version: version, spoken_confirmation_sha256: sha(this.lastCancel.rendered.th + '\n' + this.lastCancel.rendered.en),
-          spoken_turn: this.lastCancel.spokenTurn, confirm_turn: lastCaller });
-        if (r.ok) { this.lastCancel = null; this.call.outcomes.push('cancelled'); }
-        return { result: r };
+        const text = this.textConsent(input);
+        const r = await this.call.tool(name, text.input, { expected_version: version, spoken_confirmation_sha256: sha(this.lastCancel.rendered.th + '\n' + this.lastCancel.rendered.en),
+          spoken_turn: this.lastCancel.spokenTurn, confirm_turn: lastCaller, text_consent_turn: text.turn });
+        if (r.ok) { this.lastCancel = null; this.call.outcomes.push('cancelled'); if (text.turn !== undefined) this.textQueued = true; }
+        return { result: text.note && r.ok ? { ...r, data: { ...r.data, confirmation_text: text.note } } : r };
       }
       const r = await this.call.tool(name, input, { expected_version: version });
       if (r.ok && r.data.rendered_confirmation) {
