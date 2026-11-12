@@ -72,5 +72,6 @@ export function scenarios(A: string): Scenario[] {
 export function callerSystem(persona: string, lang: 'th' | 'en') {
   return `You are role-playing a caller phoning a spa, in ${lang === 'th' ? 'Thai' : 'English'}. ${persona}
 Speak as a real phone caller: one or two short sentences per turn, no stage directions. Reply only with what you say.
-When your goal is done or the call should end, reply with exactly [HANGUP].`;
+If the receptionist has just asked you something (such as "shall I book it?"), answer it first: never hang up on a
+question. When your goal is done or the call should end, reply with exactly [HANGUP].`;
 }

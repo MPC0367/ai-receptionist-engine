@@ -14,6 +14,8 @@ Free route, on the owner's "Yes, build it" and "Yes, download it". Receptionist 
 | M04 + M07 ×2 | after the emergency fixes | 3/4 | 9–23 s | one reschedule lost to empty replies (below) |
 | Third full run | `29df4e4` (words-only retry) | 15/16 | 10.9 s | 3 runaways all recovered; the failure was the retry claiming "recorded" |
 | **Fourth full run** | **`ee4c3bf`** (retry with tools, then words only, no claims) | **16/16** | 12.8 s | 1 runaway, recovered; no "system trouble" line reached a caller |
+| Fifth full run | `8ea5030` (promised transfers caught) | 14/16 | 8.9 s | M02: an unknown service read as "nothing free"; M03: a question promised, never sent |
+| Sixth full run | `3ea4a51` (relay promises, NOT_FOUND names the service) | 15/16 | 7.9 s | the failure was the caller model hanging up on a question; M02 then 3/3 with the caller rule |
 
 Passing scenarios across both full runs: Thai booking, English booking, unknown question → pending question, prompt
 injection, known FAQ, emergency. Gemma's Thai is natural and polite; it follows the tool flow once the runtime keeps it
@@ -50,11 +52,26 @@ runtime, not the model:
   was sent); negations ("ไม่สามารถโอนสาย", "can't transfer") are kept;
 - Ollama caps a reply at 200 tokens without thinking (normal replies ran 16–62), so a runaway costs ~10 s, not a minute.
 
+### Said but not done (fixed 13 Nov 2026)
+
+The same fault three ways: the model tells the caller something happened, or will, that no tool did.
+
+| Seen | Now |
+|---|---|
+| "เดี๋ยวจะต่อสายให้เจ้าหน้าที่" (I'll put you through) without `request_human_transfer` | `promisesTransfer`: unless a transfer was bridged (DTMF 1), the reply is asked again with a note; a second time the runtime says "ตอนนี้ดิฉันยังต่อสายให้เจ้าหน้าที่ไม่ได้ค่ะ…" |
+| "จะส่งคำถามให้ทางทีมงานแจ้งกลับ…" without `request_owner_answer` — no question was sent | `promisesRelay`, backed by `request_owner_answer` or `log_booking_request`; a second time the runtime says it has not been sent and offers to send it |
+| A bare `NOT_FOUND` for "นวดเท้า 60" (the menu has 45) told the caller ten times that nothing was free | The gateway says it is the service that was not found, with the name given and the menu (`ToolError.detail`); the prompt says NOT_FOUND never means no free times |
+
+Offers ("…ต่อสายให้ไหมคะ?", "would you like me to pass this to the team?") and refusals ("ไม่สามารถโอนสายได้") are not
+promises; over the 462 real AI lines from the runs the two checks flag only the genuine false claims. On the real model
+the re-ask led Gemma to call the tool and answer its result honestly. The simulated caller now answers a question
+before hanging up (it had hung up on "ยืนยันจองเลยไหมคะ").
+
 ### Still open
 
-- **Spoken transfers that never happen.** In replays Gemma sometimes said "เดี๋ยวจะต่อสายให้เจ้าหน้าที่" (I'll put you
-  through) in an ordinary reply without calling `request_human_transfer`. The words-only claim check does not cover
-  ordinary replies; a caller would wait for a transfer that never comes. Not seen in the fourth run.
+- **Vaguer promises** such as "เดี๋ยวฉันประสานงานให้" (I'll coordinate it) after a refused transfer are not caught: too
+  loose to read reliably.
+- **A words-only reply thrown away for a claim** leaves the caller with "ระบบขัดข้องเล็กน้อย" — safe, but blunt.
 
 - **Latency.** 4–20 s a call on this Mac is a test speed, not a phone speed (the blueprint's filler is at 1.8 s,
   recovery at 4 s). Gemma 4 12B on this Mac is not a live-call model as it stands.
