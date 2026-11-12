@@ -9,7 +9,7 @@ first with LINE as the owner channel, massage / day spa, LiveKit Agents as the f
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 91 tests (resets the rcpt_test database per test)
+npm test              # 93 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -83,9 +83,11 @@ npm run model:run -- --provider gemini --models gemini-3.8-flash --yes    # GEMI
 - Ollama's thinking is off by default where a model can think, as on the Claude route (no extended thinking there,
   and a phone line cannot wait for it); gpt-oss cannot switch it off and reasons `low`. `--think on` or a level turns
   it on and gives the answer its own room on top of `max_tokens`.
+- A broken reply (cut off, empty, markup) is asked again with the tools, then once for words only; a words-only reply
+  that claims an action is thrown away. Ollama caps a reply at 200 tokens without thinking. `--temperature` sets it.
 - `--only M01-book-thai,M04-emergency` runs chosen scenarios (a timing check first); results carry each run's tool log.
 - Gemini's free tier uses prompts to improve Google's products: fictional data only, as here.
 - What these runs cannot say: how Claude would do. No prompt caching, server-side fallback or strict tool use on this
-  route. First real model, 12 Nov 2026: Gemma 4 12B on this Mac, 15/16 on the second full run; what it found and
+  route. First real model, 12–13 Nov 2026: Gemma 4 12B on this Mac, 16/16 on the fourth full run; what it found and
   what is still open is in `sim/model/FINDINGS.md`.
 
