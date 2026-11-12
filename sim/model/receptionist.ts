@@ -81,6 +81,13 @@ export function yesNo(t: string): 'yes' | 'no' | null {
 const THAI_WORDS = new Intl.Segmenter('th', { granularity: 'word' });
 const YES_WORDS = new Set(['ใช่', 'ได้', 'โอเค', 'ตกลง', 'เอา', 'รับ', 'ส่ง', 'ยินดี', 'สะดวก', 'ok', 'yes'])
 
+/** The caller asking for a text unprompted ("รับข้อความยืนยันได้เลยค่ะ", "please text me the details"): consent in their words. */
+export function volunteersText(t: string): boolean {
+  if (/ไม่(ต้อง|เอา|รับ|ส่ง)\S{0,10}ข้อความ|\b(no|don'?t|do not)\b[^.?!]{0,15}\btext/i.test(t)) return false;
+  return /(รับ|ส่ง|ขอ|อยากได้|อยากรับ)\S{0,8}ข้อความ|ข้อความ\S{0,12}(ด้วย|ได้เลย|มาด้วย|มาเลย)/.test(t) ||
+    /\b(text me|send me a text|send (me )?(a |the )?(text|confirmation text)|i'?d like a text|please text)\b/i.test(t);
+}
+
 /** "I'll text you a confirmation" / "จะส่งข้อความยืนยันไปที่เบอร์นี้" outside offers and refusals. */
 export function promisesText(raw: string): boolean {
   const th = raw.replace(/(ไม่สามารถ|ไม่ได้|ยังไม่|ไม่)\S{0,12}?ส่ง/g, '');
@@ -100,6 +107,8 @@ want one and the caller says yes. Do not say a text is coming.`;
 const OFFER = {
   booked: { th: 'จองเรียบร้อยแล้วค่ะ ต้องการรับข้อความยืนยันการจองทางเบอร์ที่โทรมาไหมคะ', en: "You're booked. Would you like a text confirming the booking at this number?" },
   moved: { th: 'เลื่อนนัดเรียบร้อยแล้วค่ะ ต้องการรับข้อความยืนยันนัดทางเบอร์ที่โทรมาไหมคะ', en: "That's moved. Would you like a text confirming the booking at this number?" },
+  bookedSent: { th: 'จองเรียบร้อยแล้วค่ะ ส่งข้อความยืนยันไปที่เบอร์ที่โทรมาแล้วนะคะ', en: "You're booked, and I've texted the confirmation to this number." },
+  movedSent: { th: 'เลื่อนนัดเรียบร้อยแล้วค่ะ ส่งข้อความยืนยันไปที่เบอร์ที่โทรมาแล้วนะคะ', en: "That's moved, and I've texted the confirmation to this number." },
   sent: { th: 'ส่งข้อความยืนยันไปที่เบอร์นี้แล้วค่ะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ', en: "I've texted the confirmation to this number. Is there anything else I can help with?" },
   no: { th: 'ได้ค่ะ ไม่ส่งข้อความนะคะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ', en: 'No problem, no text. Is there anything else I can help with?' },
   cannot: { th: 'ขออภัยค่ะ ส่งข้อความไปที่เบอร์นี้ไม่ได้ค่ะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ', en: "Sorry, I can't text this number. Is there anything else I can help with?" },
@@ -355,6 +364,11 @@ export class Receptionist {
 
   private speakCode(text: string) { this.call.say(text); return text; }
 
+  /** The caller's own request for a text in this call, if any (the latest turn that asks for one). */
+  private volunteered(): number | undefined {
+    return [...this.call.turns].reverse().find(t => t.who === 'caller' && volunteersText(t.text))?.seq;
+  }
+
   /** The caller's answer to the runtime's text offer: yes sends it, no settles it, anything else goes to the model. */
   private async answerTextOffer(callerText: string): Promise<string | null> {
     const offer = this.textOffer;
@@ -388,6 +402,8 @@ export class Receptionist {
     const answer = this.textAskedTurn === null ? undefined : this.call.turns.find(t => t.who === 'caller' && t.seq > this.textAskedTurn!);
     const verdict = answer ? yesNo(answer.text) : null;
     if (answer && verdict === 'yes') return { input, turn: answer.seq };
+    const asked = this.volunteered();
+    if (asked !== undefined && !this.textDeclined) return { input, turn: asked };
     if (answer && verdict === 'no') this.textDeclined = true;
     this.events.push('text_without_consent');
     return { input: { ...input, send_confirmation_text: false },
@@ -422,6 +438,18 @@ export class Receptionist {
         confirm_turn: lastCaller, expected_version: input.booking_ref ? this.versions.get(input.booking_ref) : undefined, text_consent_turn: text.turn };
       const r = await this.call.tool(name, text.input, meta);
       if (r.ok) { this.lastHold = null; this.call.outcomes.push(name === 'create_booking' ? 'booked' : 'rescheduled'); if (r.data.text_queued) this.textQueued = true; }
+      const ref = name === 'create_booking' ? r.data?.booking_ref : input.booking_ref;
+      const own = r.ok && !r.data.text_queued && r.data.can_text && !this.textDeclined ? this.volunteered() : undefined;
+      if (own !== undefined) {
+        // The caller asked for a text themselves: send it now, no question needed.
+        const t = await this.call.tool('send_booking_text', { booking_ref: ref }, { text_consent_turn: own });
+        if (t.ok) {
+          this.textQueued = true; this.events.push('text_sent_on_request');
+          const line = OFFER[name === 'create_booking' ? 'bookedSent' : 'movedSent'][this.call.lang];
+          this.call.say(line);
+          return { result: { ...r, data: { ...r.data, confirmation_text: 'sent: the caller asked for one' } }, say: line };
+        }
+      }
       if (r.ok && !r.data.text_queued && r.data.can_text && !this.textDeclined) {
         // The runtime offers the text itself (the owner's "Yes, offer it", 13 Nov 2026: Gemma never asked).
         const offer = OFFER[name === 'create_booking' ? 'booked' : 'moved'][this.call.lang];

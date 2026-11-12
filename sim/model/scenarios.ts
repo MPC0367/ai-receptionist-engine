@@ -4,6 +4,7 @@
  */
 import type { Call } from '../session.ts';
 import { withTenant } from '../../src/db.ts';
+import { asksAboutText, volunteersText, yesNo } from './receptionist.ts';
 
 export type Scenario = {
   id: string; lang: 'th' | 'en'; ani: string;
@@ -14,6 +15,9 @@ export type Scenario = {
 
 const q = (tenant: string, sql: string, p: unknown[] = []) => withTenant(tenant, async tx => (await tx.query(sql, p)).rows);
 const said = (call: Call, re: RegExp) => call.turns.some(t => t.who === 'ai' && re.test(t.text));
+/** Whether the caller agreed to a text in the call: asked for one, or said yes right after the AI offered one. */
+const agreedToText = (call: Call) => call.turns.some((t, i) => t.who === 'caller' &&
+  (volunteersText(t.text) || (yesNo(t.text) === 'yes' && call.turns.slice(0, i).reverse().find(x => x.who === 'ai') && asksAboutText(call.turns.slice(0, i).reverse().find(x => x.who === 'ai')!.text))));
 /** Texts queued to the caller's number during the scenario (booking confirmations, answers). */
 const textsTo = async (tenant: string, ani: string) => Number((await q(tenant, `select count(*)::int n from outbox_events where payload->>'to' = $1`, [ani]))[0].n);
 const check = (pairs: Array<[boolean, string]>) => ({ pass: pairs.every(([ok]) => ok), why: pairs.filter(([ok]) => !ok).map(([, w]) => w) });
@@ -21,14 +25,14 @@ const check = (pairs: Array<[boolean, string]>) => ({ pass: pairs.every(([ok]) =
 export function scenarios(A: string): Scenario[] {
   return [
     { id: 'M01-book-thai', lang: 'th', ani: '+66812340001',
-      persona: 'คุณชื่อ "มด" โทรมาจองนวดไทย 60 นาที พรุ่งนี้บ่ายสาม กับใครก็ได้ ถ้าเวลานั้นว่างให้ตกลง ถ้าถูกถามว่าจะรับข้อความยืนยันไหมให้ตอบว่าได้ เมื่อจองเสร็จให้ขอบคุณแล้ววางสาย',
+      persona: 'คุณชื่อ "มด" โทรมาจองนวดไทย 60 นาที พรุ่งนี้บ่ายสาม กับใครก็ได้ ถ้าเวลานั้นว่างให้ตกลง คุณอยากได้ข้อความยืนยันทางมือถือด้วย ถ้าถูกถามว่าจะรับข้อความยืนยันไหมให้ตอบว่าได้ เมื่อจองเสร็จให้ขอบคุณแล้ววางสาย',
       grade: async (call) => {
         const ap = await q(A, `select starts_at, status from appointments where created_by_conversation = $1`, [call.conversationId]);
         const confirmIdx = call.turns.findIndex(t => t.who === 'ai' && t.text.startsWith('ขอทวนนะคะ'));
         return check([[ap.length === 1, 'exactly one booking'],
           [ap[0] && new Date(ap[0].starts_at).toISOString() === '2026-11-13T08:00:00.000Z', 'Fri 13 Nov 15:00 Bangkok'],
           [confirmIdx >= 0, 'confirmation sentence spoken by the runtime'],
-          [await textsTo(A, '+66812340001') === 1, 'one confirmation text: the caller said yes when it was offered']]);
+          [await textsTo(A, '+66812340001') === (agreedToText(call) ? 1 : 0), 'a confirmation text exactly when the caller agreed to one']]);
       } },
     { id: 'M02-ambiguous-clock', lang: 'th', ani: '+66812340002',
       persona: 'คุณชื่อ "ต้น" ขอจองนวดเท้าพรุ่งนี้ "สามโมง" (ไม่บอกว่าเช้าหรือบ่าย) ถ้าถูกถามให้ตอบว่าบ่ายสาม ตกลงเวลาที่เสนอ แล้ววางสาย',

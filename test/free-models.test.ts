@@ -598,3 +598,25 @@ test('a move\'s summary keeps both times and drops the question', async () => {
   assert.equal(r.data.rendered_summary.th, 'เลื่อนนัดเรียบร้อยแล้วค่ะ: นวดไทย 60 นาที จากวันศุกร์ที่ 20 พฤศจิกายน 2569 เวลา 15:00 น. (บ่ายสามโมง) เป็นวันเสาร์ที่ 21 พฤศจิกายน 2569 เวลา 15:00 น. (บ่ายสามโมง) กับคุณนก');
   assert.equal(r.data.rendered_summary.en, "Moved: your Thai massage, 60 minutes from Friday 20 November 2026 at 3:00 pm to Saturday 21 November 2026 at 3:00 pm with Nok.");
 });
+
+test('a caller who asks for a text gets one without being asked', async () => {
+  const { volunteersText } = await import('../sim/model/receptionist.ts');
+  for (const t of ['ยืนยันค่ะ รับข้อความยืนยันได้เลยค่ะ', 'ส่งข้อความมาด้วยนะคะ', 'Yes, and please text me the details.']) assert.ok(volunteersText(t), t);
+  for (const t of ['ไม่ต้องส่งข้อความนะคะ', 'ยืนยันค่ะ ขอบคุณค่ะ', "Don't text me, thanks."]) assert.ok(!volunteersText(t), t);
+  const texts = () => withTenant(A, async tx => (await tx.query(`select count(*)::int n from outbox_events where payload->>'to' = $1`, [CALLER])).rows[0].n);
+  for (const modelSetsFlag of [false, true]) {
+    const clock = await fresh();
+    const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+    brain = msgs => {
+      const r = textBrain(false)(msgs);
+      if ('tool' in r && r.tool?.name === 'create_booking') r.tool.args = { ...(r.tool.args as object), send_confirmation_text: modelSetsFlag };
+      return r;
+    };
+    const rec = new Receptionist(new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` }), call, 'stand-in', 'ร้านสปาตัวอย่าง');
+    await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ ชื่ออันนา');
+    const last = await rec.respond('ใช่ค่ะ รับข้อความยืนยันได้เลยค่ะ');
+    assert.equal(await texts(), 1, `one text (the model ${modelSetsFlag ? 'set' : 'did not set'} the flag)`);
+    if (!modelSetsFlag) assert.equal(last, 'จองเรียบร้อยแล้วค่ะ ส่งข้อความยืนยันไปที่เบอร์ที่โทรมาแล้วนะคะ', 'the runtime sends it and says so');
+    else assert.equal(last, 'จองเรียบร้อยแล้วค่ะ จะส่งข้อความยืนยันไปที่เบอร์นี้นะคะ', 'the booking sent it, so the model may say so');
+  }
+});
