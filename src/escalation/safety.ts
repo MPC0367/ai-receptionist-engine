@@ -6,7 +6,7 @@ export type Tier = 'E' | 'P' | 'S' | 'N';
 export type GateResult = { tier: Tier; category: string; detectors: string[]; masked: string; source: 'rules' | 'classifier' | 'fail_closed' };
 export type Classifier = (text: string) => Promise<{ tier: Tier; category: string }>;
 
-const EMERGENCY = /collapsed|unconscious|not breathing|can'?t breathe|chest pain|bleeding (a lot|heavily)|seizure|overdose|suicid|kill (my|him|her)self|\bfire\b|ambulance|หมดสติ|ไม่หายใจ|หายใจไม่ออก|เจ็บหน้าอก|เลือดออกมาก|ชัก|ฆ่าตัวตาย|ไฟไหม้|รถพยาบาล|ฉุกเฉิน|เป็นลม/i;
+const EMERGENCY = /collapsed|unconscious|unresponsive|won'?t wake|not waking|not breathing|can'?t breathe|chest pain|bleeding (a lot|heavily)|seizure|overdose|suicid|kill (my|him|her)self|\bfire\b|ambulance|หมดสติ|สลบ|ไม่ได้สติ|ไม่รู้สึกตัว|ไม่ฟื้น|ไม่ตอบสนอง|ไม่หายใจ|หายใจไม่ออก|เจ็บหน้าอก|เลือดออกมาก|ชัก|ฆ่าตัวตาย|ไฟไหม้|รถพยาบาล|ฉุกเฉิน|เป็นลม/i;
 const MEDICAL_ADVICE = /diagnos|prescri|what medicine|which medication|safe to take|cure my|treat my|ยาอะไร|วินิจฉัย|รักษาโรค|กินยาอะไร/i;
 const LEGAL_FIN = /lawyer|\bsue\b|legal advice|\binvest|\bloan\b|ฟ้อง|ทนาย|กู้เงิน|ลงทุน/i;
 const OTHER_PERSON = /who (else )?(is|was) (booked|coming)|other (client|customer)s?'?|someone else'?s (booking|appointment)|ใครจอง|ลูกค้าคนอื่น|เบอร์ของ(คุณ)?\S+คนอื่น/i;

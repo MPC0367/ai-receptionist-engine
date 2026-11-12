@@ -319,3 +319,27 @@ test('a reply cut off at the token limit is never read out', async () => {
   assert.equal(await rec.respond('สวัสดีค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
   assert.deepEqual(rec.events, ['reply_cut_off']);
 });
+
+test('an emergency stays an emergency: "still not conscious" triggers the rule, and a discarded reply repeats 1669', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  brain = () => text('ให้ยกขาสูง 30 เซนติเมตรค่ะ'); // an invented number: the grounding check throws it away
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  const first = await rec.respond('แม่หมดสติหลังนวดค่ะ');
+  assert.match(first, /1669/);
+  assert.match(await rec.respond('แม่ยังไม่รู้สึกตัวเลยค่ะ'), /1669/, 'ไม่รู้สึกตัว is on the emergency list');
+  assert.equal(await rec.respond('ต้องทำอะไรก่อนดีคะ'), first, 'a discarded reply repeats the emergency line, not "no confirmed answer"');
+  assert.deepEqual(rec.events, ['emergency_rule', 'emergency_rule', 'grounding_rejected']);
+});
+
+test('an internal label is never said to the caller', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  brain = () => text('ตรวจสอบข้อมูลการจองลำดับที่ B1 ให้แล้วค่ะ');
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('ขอเลื่อนนัดค่ะ'), 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย');
+  assert.deepEqual(rec.events, ['label_spoken_rejected']);
+  assert.ok(!call.turns.some(t => t.text.includes('B1')));
+});

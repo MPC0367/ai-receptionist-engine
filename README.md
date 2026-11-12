@@ -9,7 +9,7 @@ first with LINE as the owner channel, massage / day spa, LiveKit Agents as the f
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 87 tests (resets the rcpt_test database per test)
+npm test              # 91 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -86,5 +86,6 @@ npm run model:run -- --provider gemini --models gemini-3.8-flash --yes    # GEMI
 - `--only M01-book-thai,M04-emergency` runs chosen scenarios (a timing check first); results carry each run's tool log.
 - Gemini's free tier uses prompts to improve Google's products: fictional data only, as here.
 - What these runs cannot say: how Claude would do. No prompt caching, server-side fallback or strict tool use on this
-  route. Tested against a stand-in server only (`test/free-models.test.ts`); no real model has run yet.
+  route. First real model, 12 Nov 2026: Gemma 4 12B on this Mac, 15/16 on the second full run; what it found and
+  what is still open is in `sim/model/FINDINGS.md`.
 

@@ -36,7 +36,7 @@ export type CompatOptions = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-export type CompatStats = { requests: number; retries: number; unparseableArgs: number; toolCallsAsText: number; tokens: number };
+export type CompatStats = { requests: number; retries: number; unparseableArgs: number; toolCallsAsText: number; tokens: number; hiddenThinking?: number };
 
 /** Raised when the provider keeps refusing for rate or quota reasons: the runner stops and keeps what finished. */
 export class QuotaError extends Error {}
@@ -113,7 +113,10 @@ function parseArgs(raw: unknown, stats: CompatStats): Record<string, unknown> {
 }
 
 function cleanText(s: unknown, stats: CompatStats) {
-  const t = String(s ?? '').replace(THINK, '').trim();
+  const raw = String(s ?? ''), t = raw.replace(THINK, '').trim();
+  // Words that were all reasoning: Gemma 4 12B did this with thinking off, running to the token cap (12 Nov 2026).
+  if (!t && THINK.test(raw)) stats.hiddenThinking = (stats.hiddenThinking ?? 0) + 1;
+  THINK.lastIndex = 0;
   if (TOOL_AS_TEXT.test(t)) stats.toolCallsAsText++;
   return t;
 }
@@ -140,6 +143,8 @@ export function fromOllama(r: any, stats: CompatStats) {
   const text = cleanText(msg.content, stats);
   if (text) content.push({ type: 'text', text });
   for (const c of msg.tool_calls ?? []) content.push({ type: 'tool_use', id: newId(), name: c.function?.name, input: parseArgs(c.function?.arguments, stats) });
+  // Empty words but thinking text: the model reasoned although thinking was off (seen as 1,024-token empty replies).
+  if (!text && !msg.tool_calls?.length && msg.thinking) stats.hiddenThinking = (stats.hiddenThinking ?? 0) + 1;
   const cached = r.prompt_eval_cached_count ?? 0;
   const stop = content.some(b => b.type === 'tool_use') ? 'tool_use' : r.done_reason === 'length' ? 'max_tokens' : 'end_turn';
   return { content, stop_reason: stop, usage: { input_tokens: Math.max(0, (r.prompt_eval_count ?? 0) - cached), output_tokens: r.eval_count ?? 0, cache_read_input_tokens: cached, cache_creation_input_tokens: 0 } };

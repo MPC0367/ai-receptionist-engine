@@ -140,24 +140,24 @@ if (import.meta.main) {
   mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const stats = compat.map(c => c.stats);
-  const sum = (k: keyof CompatClient['stats']) => stats.reduce((s, x) => s + x[k], 0);
+  const sum = (k: keyof CompatClient['stats']) => stats.reduce((s, x) => s + (x[k] ?? 0), 0);
   writeFileSync(path.join(dir, `${stamp}.json`), JSON.stringify({ provider, callerProvider, callerModel, opts, stopped, stats, results }, null, 2));
   const runsWith = (rs: any[], ...ev: string[]) => rs.filter(x => ev.some(e => x.events.includes(e))).length;
   const lines = models.map(m => {
     const rs = results.filter(x => x.model === m), pass = rs.filter(x => x.pass).length;
     const calls = rs.reduce((s, x) => s + x.usage.calls, 0), ms = rs.reduce((s, x) => s + x.usage.ms, 0);
-    return `| ${m} | ${pass}/${rs.length} | ${runsWith(rs, 'grounding_rejected')} | ${runsWith(rs, 'invalid_tool_call')} | ${runsWith(rs, 'machine_text_rejected', 'empty_reply')} | ${(ms / Math.max(1, calls)).toFixed(0)} ms | ${paid ? `US$${rs.reduce((s, x) => s + x.cost, 0).toFixed(2)}` : 'free'} |`;
+    return `| ${m} | ${pass}/${rs.length} | ${runsWith(rs, 'grounding_rejected')} | ${runsWith(rs, 'invalid_tool_call')} | ${runsWith(rs, 'machine_text_rejected', 'empty_reply', 'reply_cut_off', 'label_spoken_rejected')} | ${(ms / Math.max(1, calls)).toFixed(0)} ms | ${paid ? `US$${rs.reduce((s, x) => s + x.cost, 0).toFixed(2)}` : 'free'} |`;
   });
   const freeNote = free ? [
     '',
     'Open-model results show how these models behave in this runtime; they do not say how Claude would. This route has no prompt caching, server-side fallback or strict tool use: the runtime checked every tool call itself.',
-    stats.length ? `Provider requests ${sum('requests')}, retries ${sum('retries')}, unparseable arguments ${sum('unparseableArgs')}, tool calls written as text ${sum('toolCallsAsText')}, tokens ${sum('tokens')}.` : '',
+    stats.length ? `Provider requests ${sum('requests')}, retries ${sum('retries')}, unparseable arguments ${sum('unparseableArgs')}, tool calls written as text ${sum('toolCallsAsText')}, replies that were all reasoning ${sum('hiddenThinking')}, tokens ${sum('tokens')}.` : '',
   ] : [];
   writeFileSync(path.join(dir, `${stamp}.md`), [
     `# Model-driven Gate A run ${stamp}`, '',
     `Receptionist on **${provider}**${opts.baseURL ? ` (${opts.baseURL})` : ''}; caller model ${callerModel} on ${callerProvider}. Fictional data only.`,
     ...(stopped ? ['', `**Stopped early:** ${stopped}.`] : []), '',
-    '| Turn model | Passed | Runs with a grounding rejection | Runs with an invalid tool call | Runs with markup or silence rejected | Mean API time per call | Cost (incl. caller model) |',
+    '| Turn model | Passed | Runs with a grounding rejection | Runs with an invalid tool call | Runs with a reply thrown away (markup, silence, cut off, a label) | Mean API time per call | Cost (incl. caller model) |',
     '|---|---|---|---|---|---|---|',
     ...lines, ...freeNote, '',
   ].join('\n'));

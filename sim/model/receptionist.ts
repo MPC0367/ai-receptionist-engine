@@ -15,6 +15,8 @@ const dropNulls = (v: any): any => v && typeof v === 'object' && !Array.isArray(
   ? Object.fromEntries(Object.entries(v).filter(([, x]) => x !== null).map(([k, x]) => [k, dropNulls(x)])) : v;
 /** Text that is markup or JSON, not something a person would say (a tool call written as text, a template leak). */
 const machineLike = (t: string) => /^\s*[{\[]|<\/?[a-z_|]+[^>]*>|\[TOOL|```/i.test(t);
+/** An internal label (S1, H1, B1) in words meant for the caller (Gemma said "ลำดับที่ B1", 12 Nov 2026). */
+const saysLabel = (t: string) => /(^|[^A-Za-z0-9])[SHB]\d{1,3}(?![A-Za-z0-9])/.test(t);
 /** A stand-in for a name the caller never gave ("คุณลูกค้า", "customer"): seen from Gemma 4 12B, 12 Nov 2026. */
 const PLACEHOLDER_NAME = /^(คุณ)?\s*(ลูกค้า|ผู้จอง|ผู้โทร|ไม่ทราบ(ชื่อ)?|ไม่ระบุ|-+)\s*$|^(the\s+)?(customer|caller|client|guest|user|unknown|n\/?a|name)$/i;
 const nameProblems = (tool: string, a: any) => ["hold_slot", "create_booking", "log_booking_request"].includes(tool) && typeof a.client_name === "string" && PLACEHOLDER_NAME.test(a.client_name.trim())
@@ -33,6 +35,8 @@ Rules (the runtime enforces them; breaking one discards your reply):
 - Bookings: identify the service with the caller, then call search_availability with the caller's own date/time words in date_phrase (do not convert them). If it returns needs_clarification, ask that question. Offer at most three times, reading the start_local text exactly. When the caller picks one, call hold_slot with that slot_token and the caller's name. The runtime then reads the exact confirmation sentence aloud itself — do not repeat or paraphrase it. Only after the caller clearly says yes, call create_booking (send_confirmation_text true only if the caller agreed to a text).
 - If a time is taken (CONFLICT), say so briefly and offer the alternatives the tools give.
 - Questions: call get_business_facts. If it returns no_answer or conflict, say you don't have a confirmed answer and won't guess; offer to send the question to the team and text the caller their reply. If the caller wants that: restate the question in one short neutral sentence and ask if it is right, confirm the number (the one they are calling from unless they give another) and ask permission to text about this question; then call record_consent, then request_owner_answer. The runtime reads the expectation sentence itself.
+- You already have the number the caller is calling from: never ask for it.
+- References in tool results such as S1, H1, B1 are internal labels: pass them to tools exactly, never say them to the caller.
 - If the caller asks for a person, call request_human_transfer.
 - Reschedule or cancel: call get_bookings_for_caller first; you can only change a booking it returns.
 - If search_availability fails with system_trouble, call log_booking_request and tell the caller it is a request, not a booking.
@@ -93,6 +97,7 @@ export class Receptionist {
   private lastCancel: { ref: string; rendered: { th: string; en: string }; spokenTurn: number; version: number } | null = null;
   private versions = new Map<string, number>();
   private refs = new Handles();
+  private emergencyLine: string | undefined;
 
   private client: ModelClient; private call: Call; private model: string; private business: string; private effort: 'low' | 'medium';
   constructor(client: ModelClient, call: Call, model: string, business: string, effort: 'low' | 'medium' = 'low') {
@@ -135,7 +140,7 @@ export class Receptionist {
   /** One caller utterance in, the receptionist's spoken reply out (possibly after several tool calls). */
   async respond(callerText: string): Promise<string> {
     const em = await this.call.listen(callerText);
-    if (em) { this.events.push('emergency_rule'); return this.call.turns.at(-1)!.text; }
+    if (em) { this.events.push('emergency_rule'); this.emergencyLine = this.call.turns.at(-1)!.text; return this.emergencyLine; }
     this.messages.push({ role: 'user', content: callerText });
     let writeFailed = false;
     for (let step = 0; step < 8; step++) {
@@ -153,7 +158,7 @@ export class Receptionist {
         if (r.stop_reason === 'max_tokens') {
           // A reply cut off at the token limit is never read out (one run on Gemma 4 12B ran on to the limit).
           this.events.push('reply_cut_off'); this.discarded.push(text.slice(0, 300));
-          return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
+          return this.fallback(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
         }
         if (writeFailed) {
           // A booking, move or cancellation failed in this turn and nothing succeeded after it: the caller hears that
@@ -161,14 +166,14 @@ export class Receptionist {
           this.events.push('unconfirmed_write');
           return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ รายการนี้ยังไม่สำเร็จ ยังไม่มีการเปลี่ยนแปลงใดๆ นะคะ' : "I'm sorry, that hasn't gone through, so nothing has changed yet.");
         }
-        if (!text || machineLike(text)) {
+        if (!text || machineLike(text) || saysLabel(text)) {
           // Never read markup or silence to a caller (seen with open models that write a tool call as text).
-          this.events.push(text ? 'machine_text_rejected' : 'empty_reply'); if (text) this.discarded.push(text.slice(0, 300));
-          return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
+          this.events.push(!text ? 'empty_reply' : saysLabel(text) && !machineLike(text) ? 'label_spoken_rejected' : 'machine_text_rejected'); if (text) this.discarded.push(text.slice(0, 300));
+          return this.fallback(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
         }
         if (!grounded(text, this.call.corpus)) {
           this.events.push('grounding_rejected');
-          return this.speakCode(this.call.lang === 'th' ? 'ดิฉันยังไม่มีคำตอบที่ยืนยันได้สำหรับเรื่องนี้ และไม่อยากเดาค่ะ' : "I don't have a confirmed answer to that, and I don't want to guess.");
+          return this.fallback(this.call.lang === 'th' ? 'ดิฉันยังไม่มีคำตอบที่ยืนยันได้สำหรับเรื่องนี้ และไม่อยากเดาค่ะ' : "I don't have a confirmed answer to that, and I don't want to guess.");
         }
         this.call.say(text);
         return text;
@@ -203,10 +208,16 @@ export class Receptionist {
       }
     }
     this.events.push('step_limit');
-    return this.speakCode(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
+    return this.fallback(this.call.lang === 'th' ? 'ขออภัยค่ะ ระบบขัดข้องเล็กน้อย' : "I'm having trouble on my side.");
   }
 
   private speakCode(text: string) { this.call.say(text); return text; }
+
+  /**
+   * What the runtime says when it throws a reply away. Once an emergency has come up in the call, that is the emergency
+   * line again, never "no confirmed answer" (a frightened caller heard that twice after 1669, 12 Nov 2026).
+   */
+  private fallback(text: string) { return this.speakCode(this.emergencyLine ?? text); }
 
   private async runTool(name: string, input: any): Promise<{ result: any; say?: string }> {
     const lastCaller = [...this.call.turns].reverse().find(t => t.who === 'caller')!.seq;
