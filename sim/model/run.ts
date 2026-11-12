@@ -11,6 +11,7 @@
  *     node sim/model/run.ts --provider gemini --models gemini-3.8-flash --yes
  *   Keep one caller model for every receptionist model so differences come from the receptionist:
  *   --caller-provider / --caller-model (default: the first --models entry on the same provider).
+ *   --only M01-book-thai,M04-emergency runs just those scenarios (a timing check before a full run).
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -53,19 +54,23 @@ export async function runOne(client: ModelClient, callerClient: ModelClient, sc:
   for (let turn = 0; turn < 12; turn++) {
     const r = await callerClient.messages.create({ model: callerModel, max_tokens: 400, system: callerSystem(sc.persona, sc.lang), messages: callerMsgs, output_config: { effort: 'low' } });
     callerUsage.calls++; callerUsage.input += r.usage?.input_tokens ?? 0; callerUsage.output += r.usage?.output_tokens ?? 0; callerUsage.cacheRead += r.usage?.cache_read_input_tokens ?? 0;
-    const said = r.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ').trim();
-    if (!said || said.includes('[HANGUP]')) break;
+    const out = r.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ');
+    // "ยืนยันจองเลยค่ะ ขอบคุณค่ะ [HANGUP]": what is said before the hang-up still reaches the receptionist (found 12 Nov
+    // 2026: the whole turn, the "yes" included, used to be dropped).
+    const hangup = out.includes('[HANGUP]'), said = out.replace(/\[HANGUP\]/g, '').trim();
+    if (!said) break;
     callerMsgs.push({ role: 'assistant', content: said });
     clock.advance(20_000);
     const reply = await rec.respond(said);
     callerMsgs.push({ role: 'user', content: reply });
+    if (hangup) break;
     if (call.outcomes.includes('unsafe_refused/emergency') && turn > 1) break;
   }
   clock.advance(10_000);
   await call.end();
   await drain(clock.now());
   const g = await sc.grade(call, rec.events);
-  return { scenario: sc.id, model, pass: g.pass, why: g.why, events: rec.events, usage: rec.usage, callerUsage,
+  return { scenario: sc.id, model, pass: g.pass, why: g.why, events: rec.events, tools: rec.toolLog, usage: rec.usage, callerUsage,
     cost: cost(model, rec.usage) + cost(callerModel, callerUsage), transcript: call.turns.map(t => `${t.who === 'ai' ? 'AI' : 'Caller'}: ${t.text}`) };
 }
 
@@ -92,7 +97,9 @@ if (import.meta.main) {
   const callerModel = arg('--caller-model', callerProvider === 'anthropic' ? 'claude-opus-5-5' : models[0])!;
   const repeats = Number(arg('--repeats', '2')), budget = Number(arg('--budget-usd', '30'));
   const opts: Opts = { baseURL: arg('--base-url'), numCtx: arg('--num-ctx'), think: arg('--think'), minInterval: arg('--min-interval-ms') };
-  const list = scenarios(A);
+  const only = arg('--only')?.split(',');
+  const list = scenarios(A).filter(s => !only || only.includes(s.id));
+  if (!list.length) { console.log(`No scenario matches --only ${only}.`); process.exit(1); }
   const paid = provider === 'anthropic' || callerProvider === 'anthropic';
   const estimate = list.length * repeats * models.reduce((s, m) => s + ({ 'claude-opus-5-5': 0.35, 'claude-sonnet-5-5': 0.2, 'claude-haiku-5-5': 0.08 }[m] ?? (free ? 0 : 0.35)), 0);
   console.log(`${list.length} scenarios × ${repeats} × ${models.length} models on ${provider}; caller ${callerModel} on ${callerProvider}.`);

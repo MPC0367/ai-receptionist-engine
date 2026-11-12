@@ -15,6 +15,10 @@ const dropNulls = (v: any): any => v && typeof v === 'object' && !Array.isArray(
   ? Object.fromEntries(Object.entries(v).filter(([, x]) => x !== null).map(([k, x]) => [k, dropNulls(x)])) : v;
 /** Text that is markup or JSON, not something a person would say (a tool call written as text, a template leak). */
 const machineLike = (t: string) => /^\s*[{\[]|<\/?[a-z_|]+[^>]*>|\[TOOL|```/i.test(t);
+/** A stand-in for a name the caller never gave ("คุณลูกค้า", "customer"): seen from Gemma 4 12B, 12 Nov 2026. */
+const PLACEHOLDER_NAME = /^(คุณ)?\s*(ลูกค้า|ผู้จอง|ผู้โทร|ไม่ทราบ(ชื่อ)?|ไม่ระบุ|-+)\s*$|^(the\s+)?(customer|caller|client|guest|user|unknown|n\/?a|name)$/i;
+const nameProblems = (tool: string, a: any) => ["hold_slot", "create_booking", "log_booking_request"].includes(tool) && typeof a.client_name === "string" && PLACEHOLDER_NAME.test(a.client_name.trim())
+  ? [`arguments.client_name "${a.client_name}" is not a name the caller gave: ask for their name, or leave it out`] : [];
 
 /** Minimal client surface (the real SDK client or the test double). */
 export type ModelClient = { messages: { create(p: any): Promise<any> }; beta?: { messages: { create(p: any): Promise<any> } } };
@@ -38,13 +42,55 @@ Rules (the runtime enforces them; breaking one discards your reply):
 
 type Turn = { role: 'user' | 'assistant'; content: any };
 
+/**
+ * The model never sees a real reference. Slot tokens (signed, ~300 characters), hold and booking ids (UUIDs) are
+ * shown to it as short labels — S1, H1, B1 — and turned back into the real values before the gateway sees them;
+ * internal ids (staff_id, …) are left out of what it sees.
+ * A model that cannot copy a long string exactly (Gemma 4 12B changed a signature, 12 Nov 2026) can still book,
+ * and a label means nothing outside this call. The gateway still verifies every real reference.
+ */
+const REF_KEYS: Record<string, string> = { slot_token: 'S', hold_ref: 'H', booking_ref: 'B', for_booking_ref: 'B' };
+class Handles {
+  private real = new Map<string, string>(); private label = new Map<string, string>(); private n: Record<string, number> = {};
+  short(prefix: string, value: string) {
+    let h = this.label.get(value);
+    if (!h) { h = `${prefix}${(this.n[prefix] = (this.n[prefix] ?? 0) + 1)}`; this.label.set(value, h); this.real.set(h, value); }
+    return h;
+  }
+  /** Real values out of a tool result, labels in (a copy; the runtime keeps the real result). */
+  hide(v: any, key?: string): any {
+    if (typeof v === 'string' && key && REF_KEYS[key]) return this.short(REF_KEYS[key], v);
+    if (Array.isArray(v)) return v.map(x => this.hide(x));
+    // Internal ids (staff_id, …) are never a tool argument: the model names staff and services, so they are left out.
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([k]) => !k.endsWith('_id')).map(([k, x]) => [k, this.hide(x, k)]));
+    return v;
+  }
+  /** Labels in the model's arguments back to real values; a label this call never gave is a fault. */
+  reveal(input: Record<string, unknown>): { input: Record<string, unknown>; problems: string[] } {
+    const out: Record<string, unknown> = {}, problems: string[] = [];
+    for (const [k, v] of Object.entries(input)) {
+      if (typeof v === 'string' && REF_KEYS[k]) {
+        const r = this.real.get(v.trim());
+        if (r) { out[k] = r; continue; }
+        problems.push(`arguments.${k} "${v.slice(0, 40)}" was not given by a tool in this call: use a label exactly as a tool returned it`);
+        continue;
+      }
+      out[k] = v && typeof v === 'object' && !Array.isArray(v) ? this.reveal(v as Record<string, unknown>).input : v;
+    }
+    return { input: out, problems };
+  }
+}
+
 export class Receptionist {
   messages: Turn[] = [];
   usage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, calls: 0, ms: 0 };
   events: string[] = [];
+  /** Every tool call the model made, with what came back (for reading a failed run). */
+  toolLog: Array<{ name: string; input: unknown; ok: boolean; code?: string; problems?: string[] }> = [];
   private lastHold: { ref: string; rendered: { th: string; en: string }; spokenTurn: number } | null = null;
   private lastCancel: { ref: string; rendered: { th: string; en: string }; spokenTurn: number; version: number } | null = null;
   private versions = new Map<string, number>();
+  private refs = new Handles();
 
   private client: ModelClient; private call: Call; private model: string; private business: string; private effort: 'low' | 'medium';
   constructor(client: ModelClient, call: Call, model: string, business: string, effort: 'low' | 'medium' = 'low') {
@@ -104,17 +150,21 @@ export class Receptionist {
       const results = [];
       const spoken: string[] = [];
       for (const u of uses) {
-        const input = dropNulls(u.input);
-        const problems = checkArgs(u.name, input);
+        const given = dropNulls(u.input);
+        let problems = [...checkArgs(u.name, given), ...nameProblems(u.name, given)];
+        const { input, problems: refProblems } = problems.length ? { input: given, problems: [] } : this.refs.reveal(given);
+        if (refProblems.length) { this.events.push('unknown_reference'); problems = refProblems; }
         if (problems.length) {
           // The tool never runs on a malformed call; the model is told what was wrong and may try again.
           this.events.push('invalid_tool_call');
+          this.toolLog.push({ name: u.name, input: u.input, ok: false, code: 'INVALID_ARGUMENTS', problems });
           results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify({ ok: false, error: { code: 'INVALID_ARGUMENTS', problems } }), is_error: true });
           continue;
         }
         const { result, say } = await this.runTool(u.name, input);
+        this.toolLog.push({ name: u.name, input: given, ok: !!result.ok, ...(result.ok ? {} : { code: result.error?.code ?? result.error?.speakable_hint }) });
         if (say) spoken.push(say);
-        results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify(result), ...(result.ok ? {} : { is_error: true }) });
+        results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify(this.refs.hide(result)), ...(result.ok ? {} : { is_error: true }) });
       }
       this.messages.push({ role: 'user', content: results });
       if (spoken.length) {

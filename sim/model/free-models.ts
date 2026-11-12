@@ -30,7 +30,7 @@ export const PROVIDERS: Record<Provider, Preset> = {
 export type CompatOptions = {
   provider: Provider; baseURL?: string; apiKey?: string;
   numCtx?: number;            // Ollama only (default 16384)
-  think?: string;             // Ollama only: 'on' | 'off' | a level the model lists (gpt-oss: low/medium/high); unset = model default
+  think?: string;             // Ollama only: 'on' | 'off' | a level (gpt-oss: low/medium/high); unset = off where the model can think (gpt-oss: low)
   minIntervalMs?: number; timeoutMs?: number; maxRetries?: number;
   fetch?: typeof fetch;       // tests
   sleep?: (ms: number) => Promise<void>;
@@ -91,7 +91,10 @@ export function toOllama(p: any, o: Pick<CompatOptions, 'numCtx' | 'think'>) {
       if (t) messages.push({ role: 'user', content: t });
     }
   }
-  const body: any = { model: p.model, messages, stream: false, options: { num_ctx: o.numCtx ?? 16_384, num_predict: p.max_tokens } };
+  const thinking = !!o.think && o.think !== 'off';
+  // Thinking tokens count against num_predict: with thinking on, the answer gets its own room on top (Gemma 4 12B spent
+  // the caller's whole 400 on thinking and said nothing, 12 Nov 2026).
+  const body: any = { model: p.model, messages, stream: false, options: { num_ctx: o.numCtx ?? 16_384, num_predict: thinking ? p.max_tokens + 8_192 : p.max_tokens } };
   if (p.tools?.length) body.tools = p.tools.map((t: any) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
   if (o.think) body.think = o.think === 'on' ? true : o.think === 'off' ? false : o.think;
   return body;
@@ -177,10 +180,30 @@ export class CompatClient implements ModelClient {
     return out;
   }
 
+  private caps = new Map<string, Promise<string[]>>();
+  /** What an Ollama model says it can do (cached per model); [] if it will not say. */
+  private capabilities(model: string) {
+    if (!this.caps.has(model)) this.caps.set(model, (async () => {
+      try { return (await (await (this.o.fetch ?? fetch)(`${this.base}/api/show`, { method: 'POST', body: JSON.stringify({ model }) })).json()).capabilities ?? []; }
+      catch { return []; }
+    })());
+    return this.caps.get(model)!;
+  }
+
+  /**
+   * Thinking on Ollama: off unless asked (--think), as on the Claude route, where neither the receptionist nor the caller
+   * asks for extended thinking — and a phone line cannot wait for it. gpt-oss cannot switch it off, so it reasons "low".
+   */
+  private async thinkFor(model: string) {
+    if (this.o.think) return this.o.think;
+    if (!(await this.capabilities(model)).includes('thinking')) return undefined;
+    return /^gpt-oss/.test(model) ? 'low' : 'off';
+  }
+
   async create(p: any) {
     const ollama = this.preset.transport === 'ollama';
     const url = ollama ? `${this.base}/api/chat` : `${this.base}/chat/completions`;
-    const body = JSON.stringify(ollama ? toOllama(p, this.o) : toOpenAI(p, this.preset));
+    const body = JSON.stringify(ollama ? toOllama(p, { numCtx: this.o.numCtx, think: await this.thinkFor(p.model) }) : toOpenAI(p, this.preset));
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.key) headers.authorization = `Bearer ${this.key}`;
     const f = this.o.fetch ?? fetch, max = this.o.maxRetries ?? 5;

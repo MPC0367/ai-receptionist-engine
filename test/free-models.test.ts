@@ -27,7 +27,7 @@ before(async () => {
       const body = raw ? JSON.parse(raw) : {};
       const send = (status: number, obj: unknown, headers: Record<string, string> = {}) => { res.writeHead(status, { 'content-type': 'application/json', ...headers }); res.end(JSON.stringify(obj)); };
       if (req.url === '/api/tags') return send(200, { models: [{ name: 'stand-in:latest' }] });
-      if (req.url === '/api/show') return send(200, { capabilities: ['completion', 'tools'] });
+      if (req.url === '/api/show') return send(200, { capabilities: body.model === 'thinker' ? ['completion', 'tools', 'thinking'] : ['completion', 'tools'] });
       bodies.push({ path: req.url!, body });
       const r = brain(body.messages);
       if ('status' in r) return send(r.status, { error: 'slow down' }, r.retryAfter ? { 'retry-after': r.retryAfter } : {});
@@ -91,6 +91,11 @@ test('OpenAI-compatible route: books end to end; tool calls and results keep the
   const answered = last.messages.filter((m: any) => m.role === 'tool').map((m: any) => m.tool_call_id);
   assert.deepEqual(answered, ids, 'every tool result answers its own call');
   assert.ok(last.messages.flatMap((m: any) => m.tool_calls ?? []).every((c: any) => typeof c.function.arguments === 'string'));
+  const seen = JSON.stringify(bodies.map(b => b.body.messages));
+  assert.ok(!/eyJ|[0-9a-f]{8}-[0-9a-f]{4}-/.test(seen), 'no signed slot token or UUID ever reaches the model');
+  assert.match(seen, /\\"slot_token\\":\\"S1\\"/);
+  assert.match(seen, /\\"hold_ref\\":\\"H1\\"/);
+  assert.match(seen, /\\"booking_ref\\":\\"B1\\"/);
   assert.equal(rec.usage.cacheRead, 1000 * rec.usage.calls, 'cached prompt tokens are counted as cache reads');
   assert.equal(rec.usage.input, 200 * rec.usage.calls);
 });
@@ -137,6 +142,19 @@ test('a malformed tool call never reaches the gateway: the model is told what wa
   assert.equal(client.stats.unparseableArgs, 1);
   const holds = await withTenant(A, async tx => (await tx.query(`select count(*)::int n from holds`)).rows[0].n);
   assert.equal(holds, 0);
+});
+
+test('a label the tools never gave (or a mangled real token) is refused before the gateway', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = () => ++step === 1 ? tool('hold_slot', { slot_token: 'S9', client_name: 'มด' }) : step === 2 ? tool('cancel_booking', { booking_ref: 'eyJ0IjoiMTEx.forged', confirmed: true }) : text('ขอเช็กอีกครั้งนะคะ');
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('จองเวลาเมื่อกี้เลยค่ะ'), 'ขอเช็กอีกครั้งนะคะ');
+  assert.deepEqual(rec.events, ['unknown_reference', 'invalid_tool_call', 'unknown_reference', 'invalid_tool_call']);
+  assert.match(rec.toolLog[0].problems![0], /slot_token "S9" was not given by a tool/);
+  assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from holds`)).rows[0].n), 0);
 });
 
 test('markup or silence is never read to a caller', async () => {
@@ -219,4 +237,45 @@ test('preflight: a free cloud route without its key says how to save one; nothin
     const c = new CompatClient({ provider: 'cerebras', fetch: () => { throw new Error('no network in this test'); } });
     assert.deepEqual(await c.preflight(['gpt-oss-120b']), ['cerebras needs CEREBRAS_API_KEY in engine/.env.local (sh scripts/save-key.sh cerebras).']);
   } finally { if (saved !== undefined) process.env.CEREBRAS_API_KEY = saved; }
+});
+
+test('thinking is off by default where a model can think; asked for, it gets room on top of the answer', async () => {
+  brain = () => text('ค่ะ');
+  bodies.length = 0;
+  const off = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  await off.messages.create({ model: 'thinker', max_tokens: 400, messages: [{ role: 'user', content: 'x' }] });
+  await off.messages.create({ model: 'stand-in', max_tokens: 400, messages: [{ role: 'user', content: 'x' }] });
+  assert.equal(bodies[0].body.think, false);
+  assert.equal(bodies[0].body.options.num_predict, 400);
+  assert.ok(!('think' in bodies[1].body), 'a model that cannot think is sent nothing');
+  const on = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}`, think: 'on' });
+  await on.messages.create({ model: 'thinker', max_tokens: 400, messages: [{ role: 'user', content: 'x' }] });
+  assert.equal(bodies[2].body.think, true);
+  assert.equal(bodies[2].body.options.num_predict, 400 + 8_192);
+});
+
+test('a placeholder for the caller\'s name is refused: the model must ask', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = msgs => {
+    step++;
+    const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    if (step === 1) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+    if (step === 2) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'คุณลูกค้า' });
+    return text('ขอทราบชื่อผู้จองด้วยค่ะ');
+  };
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ'), 'ขอทราบชื่อผู้จองด้วยค่ะ');
+  assert.match(rec.toolLog[1].problems![0], /is not a name the caller gave/);
+  assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from holds`)).rows[0].n), 0);
+});
+
+test('a name the caller gives with คุณ is not read back as "คุณคุณ"', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const s = await call.tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+  const h = await call.tool('hold_slot', { slot_token: s.data.options[0].slot_token, client_name: 'คุณมด' });
+  assert.match(h.data.rendered_confirmation.th, /ในชื่อคุณมด ยืนยัน/);
 });

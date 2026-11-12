@@ -158,7 +158,7 @@ export function confirmationText(lang: 'th' | 'en', a: { variant: Variant; staff
   const when = renderDateTime(a.date, a.t, lang);
   const price = a.variant.price_is_authoritative && a.variant.price_minor
     ? (lang === 'th' ? ` ราคา ${Number(a.variant.price_minor) / 100} บาท` : ` for ${Number(a.variant.price_minor) / 100} baht`) : '';
-  if (lang === 'th') return `ขอทวนนะคะ: ${a.variant.name} กับคุณ${a.staff.th} ${when}${price}${a.name ? ` ในชื่อคุณ${a.name}` : ''} ยืนยันจองเลยไหมคะ`;
+  if (lang === 'th') return `ขอทวนนะคะ: ${a.variant.name} กับคุณ${a.staff.th} ${when}${price}${a.name ? ` ในชื่อคุณ${a.name.replace(/^คุณ\s*/, '')}` : ''} ยืนยันจองเลยไหมคะ`;
   return `To confirm: ${a.variant.name_en ?? a.variant.name} with ${a.staff.en} on ${when}${price}${a.name ? `, under the name ${a.name}` : ''}. Shall I book it?`;
 }
 
