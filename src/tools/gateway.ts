@@ -346,12 +346,15 @@ async function transactionalYes(tx: Tx, c: CallClaims, a: Record<string, any>, m
   return true;
 }
 
-/** Changes need a verified caller (ANI matches the booking's client identity). */
+/** Changes need a verified caller (ANI matches the booking's client identity) and a booking that is still booked. */
 async function mustOwnBooking(tx: Tx, c: CallClaims, bookingRef: string, now: Date) {
   if (!c.ani) throw new ToolError('HUMAN_REQUIRED', 'unverified caller', 'needs_person');
-  const r = await tx.query(`select 1 from appointments ap join client_identities ci on ci.client_id = ap.client_id
+  const r = await tx.query(`select ap.status from appointments ap join client_identities ci on ci.client_id = ap.client_id
     where ap.id::text = $1 and ci.kind = 'phone' and ci.value_hash = $2`, [bookingRef, idHash(c.ani)]);
   if (!r.rowCount) throw new ToolError('NOT_FOUND', 'booking not found for this caller', 'need_more_detail');
+  // A cancelled booking cannot be moved (Gemma cancelled, then tried to "move" what it had cancelled, 13 Nov 2026).
+  if (r.rows[0].status !== 'booked') throw new ToolError('NOT_FOUND', `booking is ${r.rows[0].status}`, 'need_more_detail',
+    { not_found: 'active booking', status: r.rows[0].status, note: 'This booking is no longer active, so it cannot be moved or changed. To book again, search without for_booking_ref and use create_booking.' });
 }
 
 export function localNow(now: Date, tz: string) { return localParts(now.getTime(), tz); }

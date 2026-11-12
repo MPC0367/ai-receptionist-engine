@@ -620,3 +620,19 @@ test('a caller who asks for a text gets one without being asked', async () => {
     else assert.equal(last, 'จองเรียบร้อยแล้วค่ะ จะส่งข้อความยืนยันไปที่เบอร์นี้นะคะ', 'the booking sent it, so the model may say so');
   }
 });
+
+test('a cancelled booking cannot be moved: the error says so and points to a new booking', async () => {
+  const clock = await fresh();
+  const pre = (await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() })).call;
+  await pre.book({ service: 'นวดไทย 60', when: '20 พ.ย. 69 บ่ายสาม', name: 'บี' }); await pre.end();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const b = (await call.tool('get_bookings_for_caller', {})).data.bookings[0];
+  const ask = await call.tool('cancel_booking', { booking_ref: b.booking_ref, confirmed: false }, { expected_version: b.version });
+  const spoken = call.say(ask.data.rendered_confirmation.th), yes = call.hear('ยืนยันค่ะ');
+  assert.ok((await call.tool('cancel_booking', { booking_ref: b.booking_ref, confirmed: true }, { expected_version: b.version,
+    spoken_confirmation_sha256: sha(ask.data.rendered_confirmation.th + '\n' + ask.data.rendered_confirmation.en), spoken_turn: spoken, confirm_turn: yes })).ok);
+  const s = await call.tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: '21 พ.ย. 69 บ่ายสาม', for_booking_ref: b.booking_ref });
+  assert.equal(!s.ok && s.error.code, 'NOT_FOUND');
+  assert.equal(s.error.detail.not_found, 'active booking');
+  assert.match(s.error.detail.note, /create_booking/);
+});
