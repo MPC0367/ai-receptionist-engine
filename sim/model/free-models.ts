@@ -154,7 +154,8 @@ export function fromOllama(r: any, stats: CompatStats) {
   if (!text && !msg.tool_calls?.length && msg.thinking) stats.hiddenThinking = (stats.hiddenThinking ?? 0) + 1;
   const cached = r.prompt_eval_cached_count ?? 0;
   const stop = content.some(b => b.type === 'tool_use') ? 'tool_use' : r.done_reason === 'length' ? 'max_tokens' : 'end_turn';
-  return { content, stop_reason: stop, usage: { input_tokens: Math.max(0, (r.prompt_eval_count ?? 0) - cached), output_tokens: r.eval_count ?? 0, cache_read_input_tokens: cached, cache_creation_input_tokens: 0 } };
+  // load_ms: time Ollama spent loading the model into memory for this request (it swaps models that do not fit together).
+  return { content, stop_reason: stop, usage: { input_tokens: Math.max(0, (r.prompt_eval_count ?? 0) - cached), output_tokens: r.eval_count ?? 0, cache_read_input_tokens: cached, cache_creation_input_tokens: 0, load_ms: (r.load_duration ?? 0) / 1e6 } };
 }
 
 export class CompatClient implements ModelClient {

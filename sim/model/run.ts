@@ -129,7 +129,7 @@ if (import.meta.main) {
       const res = await runOne(recClient, callerClient, sc, m, callerModel);
       spent += res.cost; results.push(res);
       const bad = res.events.filter((e: string) => e === 'invalid_tool_call').length;
-      console.log(`${m} ${sc.id} #${r + 1}: ${res.pass ? 'PASS' : 'FAIL ' + res.why.join('; ')} · ${res.usage.calls} calls · ${(res.usage.ms / Math.max(1, res.usage.calls)).toFixed(0)} ms/call${bad ? ` · ${bad} invalid tool calls` : ''}${paid ? ` · US$${res.cost.toFixed(3)}` : ''}`);
+      console.log(`${m} ${sc.id} #${r + 1}: ${res.pass ? 'PASS' : 'FAIL ' + res.why.join('; ')} · ${res.usage.calls} calls · ${(res.usage.ms / Math.max(1, res.usage.calls)).toFixed(0)} ms/call${res.usage.loadMs ? ` (${((res.usage.ms - res.usage.loadMs) / Math.max(1, res.usage.calls)).toFixed(0)} without loading)` : ''}${bad ? ` · ${bad} invalid tool calls` : ''}${paid ? ` · US$${res.cost.toFixed(3)}` : ''}`);
     }
   } catch (e) {
     stopped = e instanceof QuotaError ? `quota: ${e.message}` : `error: ${(e as Error).message}`;
@@ -145,8 +145,8 @@ if (import.meta.main) {
   const runsWith = (rs: any[], ...ev: string[]) => rs.filter(x => ev.some(e => x.events.includes(e))).length;
   const lines = models.map(m => {
     const rs = results.filter(x => x.model === m), pass = rs.filter(x => x.pass).length;
-    const calls = rs.reduce((s, x) => s + x.usage.calls, 0), ms = rs.reduce((s, x) => s + x.usage.ms, 0);
-    return `| ${m} | ${pass}/${rs.length} | ${runsWith(rs, 'grounding_rejected')} | ${runsWith(rs, 'invalid_tool_call')} | ${runsWith(rs, 'machine_text_rejected', 'empty_reply', 'reply_cut_off', 'label_spoken_rejected')} | ${(ms / Math.max(1, calls)).toFixed(0)} ms | ${paid ? `US$${rs.reduce((s, x) => s + x.cost, 0).toFixed(2)}` : 'free'} |`;
+    const calls = rs.reduce((s, x) => s + x.usage.calls, 0), ms = rs.reduce((s, x) => s + x.usage.ms, 0), load = rs.reduce((s, x) => s + (x.usage.loadMs ?? 0), 0);
+    return `| ${m} | ${pass}/${rs.length} | ${runsWith(rs, 'grounding_rejected')} | ${runsWith(rs, 'invalid_tool_call')} | ${runsWith(rs, 'machine_text_rejected', 'empty_reply', 'reply_cut_off', 'label_spoken_rejected')} | ${(ms / Math.max(1, calls)).toFixed(0)} ms${load ? ` (${((ms - load) / Math.max(1, calls)).toFixed(0)} ms without loading the model)` : ''} | ${paid ? `US$${rs.reduce((s, x) => s + x.cost, 0).toFixed(2)}` : 'free'} |`;
   });
   const freeNote = free ? [
     '',

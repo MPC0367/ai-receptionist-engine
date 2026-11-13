@@ -9,7 +9,7 @@ import { createServer, type Server } from 'node:http';
 import { A, NUM, Call, CALLER, closeDb, fresh, sha, withTenant } from './helpers.ts';
 import { Receptionist } from '../sim/model/receptionist.ts';
 import { checkArgs, TOOL_SPECS } from '../sim/model/tools.ts';
-import { CompatClient, NO_THINK_CAP, PROVIDERS, QuotaError, fromOpenAI, toOpenAI, type CompatStats } from '../sim/model/free-models.ts';
+import { CompatClient, NO_THINK_CAP, PROVIDERS, QuotaError, fromOllama, fromOpenAI, toOpenAI, type CompatStats } from '../sim/model/free-models.ts';
 import { cost } from '../sim/model/run.ts';
 
 type Reply = { text?: string; tool?: { name: string; args: unknown }; cut?: boolean } | { status: number; retryAfter?: string };
@@ -635,4 +635,11 @@ test('a cancelled booking cannot be moved: the error says so and points to a new
   assert.equal(!s.ok && s.error.code, 'NOT_FOUND');
   assert.equal(s.error.detail.not_found, 'active booking');
   assert.match(s.error.detail.note, /create_booking/);
+});
+
+test('an Ollama reply carries its model-loading time apart, so a swapped-in model is not read as a slow answer', () => {
+  const stats: CompatStats = { requests: 0, retries: 0, unparseableArgs: 0, toolCallsAsText: 0, tokens: 0 };
+  const r = fromOllama({ message: { content: 'สวัสดีค่ะ' }, done_reason: 'stop', prompt_eval_count: 900, eval_count: 12, load_duration: 3_250_000_000 }, stats);
+  assert.equal(r.usage.load_ms, 3250);
+  assert.equal(fromOllama({ message: { content: 'ok' }, done_reason: 'stop' }, stats).usage.load_ms, 0);
 });

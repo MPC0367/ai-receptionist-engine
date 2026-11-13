@@ -125,7 +125,7 @@ const nameProblems = (tool: string, a: any) => ["hold_slot", "create_booking", "
 
 /** Minimal client surface (the real SDK client or the test double). */
 export type ModelClient = { messages: { create(p: any): Promise<any> }; beta?: { messages: { create(p: any): Promise<any> } } };
-export type Usage = { input: number; cacheRead: number; cacheWrite: number; output: number; calls: number; ms: number };
+export type Usage = { input: number; cacheRead: number; cacheWrite: number; output: number; calls: number; ms: number; loadMs?: number };
 
 export function systemPrompt(business: string, lang: 'th' | 'en') {
   return `You are the AI receptionist of ${business}, a massage and day spa, answering a phone call in ${lang === 'th' ? 'Thai' : 'English'}.
@@ -254,6 +254,7 @@ export class Receptionist {
     this.usage.ms += performance.now() - t0;
     this.usage.calls++;
     const u = r.usage ?? {};
+    if (u.load_ms) this.usage.loadMs = (this.usage.loadMs ?? 0) + u.load_ms; // a local model swapped back into memory
     this.usage.input += u.input_tokens ?? 0; this.usage.output += u.output_tokens ?? 0;
     this.usage.cacheRead += u.cache_read_input_tokens ?? 0; this.usage.cacheWrite += u.cache_creation_input_tokens ?? 0;
     return r;
