@@ -675,6 +675,8 @@ test('saidAsName: whole words the caller said, so a greeting is not a name', asy
   assert.ok(saidAsName('มด', ['ดิฉันชื่อมดค่ะ']));
   assert.ok(saidAsName('คุณต้น', ['ผมชื่อต้นครับ']));
   assert.ok(saidAsName('ณัฐดนัย', ['ผมชื่อณัฐดนัยครับ']), 'a name segmented in two pieces still starts and ends on word edges');
+  assert.ok(saidAsName('บี', ['ได้ค่ะ ชื่อบีนะคะ นัดนวดไทยวันที่ 20']), 'the segmenter reads "บีน|ะ|คะ"; the name still ends before นะคะ (Gemma, 16 Nov)');
+  assert.ok(saidAsName('บีนะคะ', ['ชื่อบีนะคะ']) && saidAsName('ชนะ', ['ผมชื่อชนะครับ']), 'particles come off the name, not a name that ends in นะ');
   assert.ok(saidAsName('Sam', ['My name is Sam.']) && saidAsName('Khun Sam', ['It\'s Sam here']));
   assert.ok(!saidAsName('Samantha', ['My name is Sam.']) && !saidAsName('Sam', ['Samantha here']));
 });

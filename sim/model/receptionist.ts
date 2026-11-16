@@ -102,7 +102,7 @@ export function claimsTaken(raw: string): boolean {
  * segmented, so "สวัส" inside "สวัสดีค่ะ" is not a word). gpt-oss-20b booked "คุณสวัส", "คู่นี้" and "คุ" (16 Nov 2026).
  */
 export function saidAsName(name: string, callerTexts: string[]): boolean {
-  const n = name.trim().replace(/^(คุณ|khun\s|mr\.?\s|mrs\.?\s|ms\.?\s|miss\s)\s*/i, '').replace(/\s*(ค่ะ|คะ|ครับ)$/, '').trim();
+  const n = name.trim().replace(/^(คุณ|khun\s|mr\.?\s|mrs\.?\s|ms\.?\s|miss\s)\s*/i, '').replace(/\s*(นะคะ|นะครับ|ค่ะ|คะ|ครับ|จ้ะ|จ้า)$/, '').trim();
   if (!n) return false;
   return n.split(/\s+/).every(part => callerTexts.some(t => wholeWordIn(part, t)));
 }
@@ -112,7 +112,11 @@ function wholeWordIn(w: string, text: string): boolean {
   }
   const edges = new Set<number>([0, text.length]);
   for (const s of THAI_WORDS.segment(text)) { edges.add(s.index); edges.add(s.index + s.segment.length); }
-  for (let i = text.indexOf(w); i >= 0; i = text.indexOf(w, i + 1)) if (edges.has(i) && edges.has(i + w.length)) return true;
+  // The segmenter can swallow a name into the particle after it ("ชื่อบีนะคะ" → ชื่อ|บีน|ะ|คะ: Gemma's "บี" was refused,
+  // 16 Nov 2026), so a name may also end before a polite particle or a space, and start after one or after ชื่อ/คือ.
+  const ends = (j: number) => edges.has(j) || /^(\s|[.,!?…]|นะ|ค่ะ|คะ|ครับ|คับ|จ้ะ|จ้า|ค่า|ฮะ)/.test(text.slice(j));
+  const starts = (i: number) => edges.has(i) || /(\s|[.,!?…]|ชื่อ|คือ)$/.test(text.slice(0, i));
+  for (let i = text.indexOf(w); i >= 0; i = text.indexOf(w, i + 1)) if (starts(i) && ends(i + w.length)) return true;
   return false;
 }
 

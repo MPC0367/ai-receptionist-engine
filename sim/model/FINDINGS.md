@@ -122,15 +122,43 @@ day (checked in the saved transcripts), so its results stand.
 
 | Seen | Runtime | 
 |---|---|
-| **"Your booking is confirmed for tomorrow at 4 pm" with no booking made** (M08 #2: both holds refused, no write attempted) | **Let through.** The "nothing has changed yet" line covers a *failed* write; nothing checks a completion claim when no write was tried. Applies to every model |
+| **"Your booking is confirmed for tomorrow at 4 pm" with no booking made** (M08 #2: both holds refused, no write attempted) | **Let through** (fixed the same day, below). The "nothing has changed yet" line covers a *failed* write; nothing checked a completion claim when no write was tried. Applies to every model |
 | "ไม่มีเวลาที่บ่ายสามโมงในวันที่ 21" after searching only "21 พฤศจิกายน" (the morning came back); 15:00 was free. The caller took 11:00 (M07 #2) | Let through: the grounding check sees offered times, not a claim that a time is *not* free |
 | `date_phrase` cut from the caller's words: "พรุ่งนี้ตอนบ่ายสาม" → "ตอนบ่ายสามโมง" (booked today), "21 พ.ย. บ่ายสาม" → "21 พฤศจิกายน" | Let through: the runtime trusts the model's phrase. The read-back said "วันพฤหัสบดีที่ 12" and the simulated caller agreed; a person might not notice either |
 | Names never given: "คุณสวัส" (from "สวัสดีค่ะ"), "คู่นี้", "คุ" | Let through: only placeholder words ("ลูกค้า", "Guest") are refused |
 | Every optional field sent as `""` (`for_booking_ref: ""`): 14 of the 27 invalid calls | Refused and handed back; it retried without the field. Costs a call each time |
 | `request_owner_answer`'s `reply_target` guessed nine ways, an invented `owner-123`, and the parking question filed as "ร้านมีกี่ชั่วโมงทำการ" (M03 #1) | Refused; the caller heard that nothing was sent (safe, no use) |
 
+### The four gaps fixed (16 Nov 2026, the owner's "Yes, fix them"), and both models again
+
+| Gap | Now |
+|---|---|
+| A completion claim with no write | `claimsDone`: unless a booking, move or cancellation succeeded in this call, the reply is asked again with a note, then the runtime says "ยังไม่ได้จองหรือเปลี่ยนนัดให้นะคะ…" / "nothing has been booked or changed yet" |
+| "Not free" for an unsearched time | `claimsTaken`: allowed only after a search found a time taken or a CONFLICT; otherwise asked again, then "ดิฉันยังไม่ได้เช็กเวลานั้นค่ะ…". Staff/transfer wording is not a time |
+| A date phrase without the caller's day or time | `mentions()` in the resolver: a search or booking request that leaves out a day (other than today) or a time the caller said is refused with their words, once per caller turn; only a missing part, never a different one (a move names two days) |
+| A name the caller never said | `saidAsName`: whole words of the caller's own turns, Thai segmented ("สวัส" in "สวัสดีค่ะ" is not a word); a name may end before a polite particle, because the segmenter reads "ชื่อบีนะคะ" as ชื่อ\|บีน\|ะ\|คะ (the first version refused Gemma's "บี" for it). A move leaves the name out |
+
+Also: an empty string for a field now means "not given", like null. Replayed over every saved call, the claim
+checks stop 4 lines, all genuine false claims (gpt-oss's two, and Gemma's "the move is confirmed" after a refusal
+on 12 Nov); every name they refuse is a stand-in, the staff member's name or a piece of a greeting.
+
+| Run, same scenarios, caller and graders | Passed | Thai bookings on the right day | What the new checks did | Time per call |
+|---|---|---|---|---|
+| gpt-oss-20b before (`b264c80`) | 8/16 | 0 of 4 | — | 8.7 s (4.8 s without loading) |
+| **gpt-oss-20b after (`1cc7777`)** | **14/16** | **all** | kept the day 7 times, refused 3 names, 1 unsearched "taken" | 9.1 s (5.0 s without loading) |
+| **Gemma 4 12B after** | **16/16** | all | refused 2 names ("คุณลูกค้า", and "บี" by the bug above) | 5.9 s |
+
+All three on battery in Low Power Mode. gpt-oss's two failures: M02 ended at the read-back because the simulated
+caller had already said yes and hung up (gpt-oss had closed its offer with "ขอบคุณครับ."); M07 is a new gap:
+
+- **A move made as a new booking.** Asked to move the 20 Nov appointment, gpt-oss never called
+  get_bookings_for_caller and booked 21 Nov as a new appointment: the caller now has two. The read-back said
+  "ยืนยันจองเลยไหมคะ", not "เลื่อนนัด", and the simulated caller agreed. Nothing ties a caller's "ขอเลื่อนนัด" to a
+  hold that moves a booking. Not fixed.
+
 ### Still open
 
+- **A move made as a new booking** (gpt-oss, 16 Nov, above): the caller is left with two appointments.
 - **Vaguer promises** such as "เดี๋ยวฉันประสานงานให้" (I'll coordinate it) after a refused transfer are not caught: too
   loose to read reliably.
 - **A words-only reply thrown away for a claim** leaves the caller with "ระบบขัดข้องเล็กน้อย" — safe, but blunt.
