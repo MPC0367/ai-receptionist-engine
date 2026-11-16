@@ -156,9 +156,31 @@ caller had already said yes and hung up (gpt-oss had closed its offer with "ข�
   "ยืนยันจองเลยไหมคะ", not "เลื่อนนัด", and the simulated caller agreed. Nothing ties a caller's "ขอเลื่อนนัด" to a
   hold that moves a booking. Not fixed.
 
+### A move made as a new booking, fixed (16 Nov 2026, the owner's "Yes, fix it")
+
+The first fix (`6b3d159`): while the caller is asking to move a booking ("ขอเลื่อนนัด", "reschedule"), a new-booking
+hold is refused until get_bookings_for_caller has run, and while it found one, until that booking is moved or the
+caller asks for another appointment as well. M07 again: gpt-oss 2/3, Gemma 2/2. The failure was a second road to
+the same double booking:
+
+| Seen (gpt-oss, M07) | Now (`031eca0`) |
+|---|---|
+| The caller only described their booking ("ขอสายคุณบีที่จองนวดไทยไว้ตอนบ่ายสามวันที่ 20"); gpt-oss held a second appointment at the same time with another therapist | `mentionsOwnBooking` ("ที่จองไว้", "มีนัด", "my appointment") counts like a move: the bookings are looked up first. It fires on no saved line outside M07 |
+| The caller's answer to the read-back was "ขอเปลี่ยนวัน…แทนได้ไหมคะ?"; two turns later their "ยืนยันค่ะ" booked the stale hold: the gateway only checked that the yes came after the read-back | `readBackYes`: a booking, move or cancellation needs the caller's **first** turn after the read-back to be a yes (`answersReadBack`: "ยืนยันจองเลยค่ะ", "ถูกต้องค่ะ"; a no to a text in the same breath is not a no to the booking), with nothing after it that changes it; that turn is the confirm_turn. Over 111 saved read-backs it reads 109 yeses and the two corrections |
+| gpt-oss wrote "(ระบบอ่าน) "ย้ายคิวของคุณบี … 21 พ.ย. …"" itself, for a hold on 20 Nov, and the caller said yes to that | `speaksAsRuntime`: a reply in the runtime's voice ("(ระบบ…)", opening "ขอทวนนะคะ:") is asked again, then replaced |
+
+M07 once more: gpt-oss 2/3, Gemma 1/1 (and M01, M08 1/1 each, the yes rule on ordinary bookings). The Mac slept
+mid-run when the lid closed (Gemma's M07 shows 204 s a call: the pause, not the model). gpt-oss's failure was not a
+double booking: it wrote the month as "พรรณิกายน", the runtime read back a move to Thursday 12 Nov, the caller said
+"ไม่ใช่ 12", and the yes rule moved nothing. That exposed a fault in the resolver itself:
+
+- **A day of the month without a month name is read as today.** `resolveWhen` at 10:00 on 12 Nov: "วันที่ 21 บ่ายสาม"
+  → 12 Nov 15:00, "the 21st at 3pm" → 12 Nov 15:00, and "วันศุกร์ที่ 20 บ่ายสาม" → Fri 13 Nov (the "20" ignored). Not
+  fixed. Callers say "วันที่ 21" all the time; every route and model goes through it.
+
 ### Still open
 
-- **A move made as a new booking** (gpt-oss, 16 Nov, above): the caller is left with two appointments.
+- **The resolver reads a bare day of the month as today** (above).
 - **Vaguer promises** such as "เดี๋ยวฉันประสานงานให้" (I'll coordinate it) after a refused transfer are not caught: too
   loose to read reliably.
 - **A words-only reply thrown away for a claim** leaves the caller with "ระบบขัดข้องเล็กน้อย" — safe, but blunt.
