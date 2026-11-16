@@ -164,6 +164,18 @@ export function resolveWhen(phrase: string, ctx: ResolveCtx): Resolved {
   return { status: 'ok', date, time: cands[0] };
 }
 
+/**
+ * What a phrase mentions, read the way resolveWhen reads it: a day (with the date it means, when it names one) and a
+ * time or a part of the day. Used to notice a model passing only part of the caller's words (gpt-oss-20b passed
+ * "ตอนบ่ายสามโมง" for "พรุ่งนี้ตอนบ่ายสาม" and the booking landed today, 16 Nov 2026).
+ */
+export function mentions(phrase: string, nowUtcMs: number, tz: string): { day: boolean; date?: LocalDate; time: boolean } {
+  const p = normalise(phrase);
+  const now = localParts(nowUtcMs, tz);
+  const dr = resolveDate(p, { y: now.y, m: now.m, d: now.d });
+  return { day: !!(dr.date || dr.clarify), date: dr.date, time: !!resolveTime(p) };
+}
+
 // Rendering for read-back -------------------------------------------------------------------------
 const TH_WD_FULL = ['วันจันทร์', 'วันอังคาร', 'วันพุธ', 'วันพฤหัสบดี', 'วันศุกร์', 'วันเสาร์', 'วันอาทิตย์'];
 const EN_WD_FULL = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];

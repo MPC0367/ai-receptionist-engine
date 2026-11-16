@@ -8,11 +8,16 @@ import { createHash } from 'node:crypto';
 import type { Call } from '../session.ts';
 import { grounded } from '../../src/knowledge.ts';
 import { TOOL_SPECS, checkArgs } from './tools.ts';
+import { mentions } from '../../src/time/resolve.ts';
+import { localParts, sameDate } from '../../src/time/zone.ts';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
-/** Open models often send null for an optional field; null means "not given". */
+/**
+ * Open models often send null or an empty string for an optional field; both mean "not given" (gpt-oss-20b sent
+ * `for_booking_ref: ""` on every search and hold, 16 Nov 2026: 14 of its 27 refused calls).
+ */
 const dropNulls = (v: any): any => v && typeof v === 'object' && !Array.isArray(v)
-  ? Object.fromEntries(Object.entries(v).filter(([, x]) => x !== null).map(([k, x]) => [k, dropNulls(x)])) : v;
+  ? Object.fromEntries(Object.entries(v).filter(([, x]) => x !== null && !(typeof x === 'string' && x.trim() === '')).map(([k, x]) => [k, dropNulls(x)])) : v;
 /** Text that is markup or JSON, not something a person would say (a tool call written as text, a template leak). */
 const machineLike = (t: string) => /^\s*[{\[]|<\/?[a-z_|]+[^>]*>|\[TOOL|```/i.test(t);
 /** An internal label (S1, H1, B1) in words meant for the caller (Gemma said "ลำดับที่ B1", 12 Nov 2026). */
@@ -54,6 +59,73 @@ export function promisesRelay(raw: string): boolean {
   return raw.split(/(?<=[.!?])\s+/).some(s => !/\?\s*$/.test(s) && !/\b(can'?t|cannot|unable|not able)\b/i.test(s) &&
     /\b(I('ll| will| have|'ve)|let me)\s+(send|pass|forward|passed|sent|forwarded)\b[^.?!]{0,40}\b(team|owner|question|message)\b|\bthe team will (text|call|contact|get back to|reply)\b/i.test(s));
 }
+
+const question = (c: string) => /(ไหม|มั้ย|หรือไม่|หรือเปล่า)(คะ|ครับ|ค่ะ|นะคะ)?\?*$|\?$/.test(c);
+
+/**
+ * Words that say a booking, a move or a cancellation is done ("จองเรียบร้อยแล้วค่ะ", "Your booking is confirmed"),
+ * outside questions, refusals and conditions. gpt-oss-20b told a caller "Your booking is confirmed for tomorrow at
+ * 4 pm" with nothing booked (16 Nov 2026): the runtime caught such a claim only after a write that failed, and here
+ * no write was tried.
+ */
+export function claimsDone(raw: string): 'booking' | 'cancel' | null {
+  const th = raw.replace(/(ไม่สามารถ|ไม่ได้|ยังไม่|ไม่)\S{0,12}?(จอง|เลื่อน|ยกเลิก|ยืนยัน|บันทึก)/g, '');
+  const thai = /(จอง|เลื่อน|ยกเลิก|ยืนยัน)\S{0,15}?(เรียบร้อย|สำเร็จ)|(จอง|เลื่อน|ยกเลิก)\S{0,8}?ให้(แล้ว|เรียบร้อย)|ได้(ทำการ)?(จอง|เลื่อน|ยกเลิก)\S{0,12}?แล้ว|ได้รับการยืนยัน|ถูก(จอง|เลื่อน|ยกเลิก)|บันทึกการ(จอง|นัด)/;
+  for (const c of th.split(/\s+/)) {
+    // "ตรวจสอบข้อมูลการจองให้แล้วค่ะ" is "I've checked the booking", not "I've booked" (Gemma, M07).
+    if (thai.test(c) && !question(c) && !/^(ถ้า|หาก|เมื่อ|หลังจาก)/.test(c) && !/ตรวจสอบ|เช็ก|เช็ค|ค้นหา|ข้อมูลการ/.test(c)) return /ยกเลิก/.test(c) ? 'cancel' : 'booking';
+  }
+  for (const s of raw.split(/(?<=[.!?])\s+/)) {
+    // n't needs its apostrophe: "appointment" ends in "nt" too.
+    if (/\?\s*$/.test(s) || /\wn['’]t\b|\b(not|cannot|unable|yet to|once|if|as soon as)\b/i.test(s)) continue;
+    if (/\b(you'?re|you are)\s+(all\s+)?(booked|set|confirmed)\b|\b(booking|appointment|reservation|it|that)(\s+is|'s|\s+has been|\s+have been)\s+(now\s+|all\s+)?(confirmed|booked|made|set|moved|rescheduled|changed|cancel+ed)\b|\b(I'?ve|I have|we'?ve|we have)\s+(now\s+)?(booked|confirmed|moved|rescheduled|changed|cancel+ed|reserved)\b|\bconfirmed for\b/i.test(s))
+      return /cancel/i.test(s) ? 'cancel' : 'booking';
+  }
+  return null;
+}
+
+/**
+ * Words that say a time is not free ("ไม่มีเวลาที่บ่ายสามโมงในวันที่ 21", "4 pm isn't available"), outside questions.
+ * gpt-oss-20b said so after searching only the day: the morning came back, and 15:00, which was free, was never
+ * checked (16 Nov 2026). Words about staff or a transfer ("ไม่มีพนักงานรับสาย", "no one is available") are not about a time.
+ */
+export function claimsTaken(raw: string): boolean {
+  const people = /พนักงาน|เจ้าหน้าที่|ต่อสาย|โอนสาย|รับสาย|\b(staff|person|people|someone|anyone|no one|nobody|transfer|team|manager)\b/i;
+  const thai = /ไม่ว่าง|ไม่มี(เวลา|คิว|ช่วง|รอบ)?\S{0,6}?ว่าง|ไม่มีเวลา|ไม่มีคิว|คิวเต็ม|เต็มแล้ว|ถูกจองไปแล้ว|มีคนจอง(ไป)?แล้ว/;
+  if (raw.split(/\s+/).some(c => thai.test(c) && !question(c) && !people.test(c))) return true;
+  return raw.split(/(?<=[.!?])\s+/).some(s => !/\?\s*$/.test(s) && !people.test(s) &&
+    /\b(isn'?t|is not|aren'?t|are not|not)\s+(available|free)\b|\bunavailable\b|\bno (availability|free (times?|slots?)|slots?|openings?)\b|\b(fully|all) booked\b|\bbooked up\b|\b(is|are|'s) (already )?taken\b|\bnothing (free|available)\b|\b(don'?t|do not) have any(thing)? (free|available)\b/i.test(s));
+}
+
+/**
+ * Whether a name for a booking is one the caller said in this call, as whole words of their own turns (Thai is
+ * segmented, so "สวัส" inside "สวัสดีค่ะ" is not a word). gpt-oss-20b booked "คุณสวัส", "คู่นี้" and "คุ" (16 Nov 2026).
+ */
+export function saidAsName(name: string, callerTexts: string[]): boolean {
+  const n = name.trim().replace(/^(คุณ|khun\s|mr\.?\s|mrs\.?\s|ms\.?\s|miss\s)\s*/i, '').replace(/\s*(ค่ะ|คะ|ครับ)$/, '').trim();
+  if (!n) return false;
+  return n.split(/\s+/).every(part => callerTexts.some(t => wholeWordIn(part, t)));
+}
+function wholeWordIn(w: string, text: string): boolean {
+  if (/^[\p{Script=Latin}'’.-]+$/u.test(w)) {
+    return new RegExp(`(^|[^\\p{L}])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}])`, 'iu').test(text);
+  }
+  const edges = new Set<number>([0, text.length]);
+  for (const s of THAI_WORDS.segment(text)) { edges.add(s.index); edges.add(s.index + s.segment.length); }
+  for (let i = text.indexOf(w); i >= 0; i = text.indexOf(w, i + 1)) if (edges.has(i) && edges.has(i + w.length)) return true;
+  return false;
+}
+
+const NO_WRITE_MADE = `
+
+Your last reply told the caller a booking, a move or a cancellation was done, but none was made in this call. Nothing
+is booked until create_booking (or reschedule_booking, or cancel_booking) succeeds: hold the time, let the runtime read
+the confirmation, and write only after the caller says yes. Do not say it is done.`;
+
+const NO_SEARCH_FOR_TIME = `
+
+Your last reply said a time is not free, but no search in this call found that. Only search_availability's result says
+whether a time is free: call it with the caller's own words for the day and the time, and go by what it returns.`;
 
 const NO_RELAY_MADE = `
 
@@ -120,8 +192,6 @@ const NO_TRANSFER_MADE = `
 Your last reply told the caller you were putting them through to a person, but no transfer was made. If the caller
 wants a person, call request_human_transfer and go by its result. Otherwise do not say that you are transferring them.`;
 
-const nameProblems = (tool: string, a: any) => ["hold_slot", "create_booking", "log_booking_request"].includes(tool) && typeof a.client_name === "string" && PLACEHOLDER_NAME.test(a.client_name.trim())
-  ? [`arguments.client_name "${a.client_name}" is not a name the caller gave: ask for their name, or leave it out`] : [];
 
 /** Minimal client surface (the real SDK client or the test double). */
 export type ModelClient = { messages: { create(p: any): Promise<any> }; beta?: { messages: { create(p: any): Promise<any> } } };
@@ -133,7 +203,7 @@ The caller already heard the greeting with the AI disclosure. Speak like a calm,
 
 Rules (the runtime enforces them; breaking one discards your reply):
 - Never state a fact, price, time, duration, address or policy unless it came from a tool result in this call or from the caller. Numbers you write are checked against tool results.
-- Bookings: identify the service with the caller, then call search_availability with the caller's own date/time words in date_phrase (do not convert them). If it returns needs_clarification, ask that question. Offer at most three times, reading the start_local text exactly. When the caller picks one, call hold_slot with that slot_token and the caller's name. The runtime then reads the exact confirmation sentence aloud itself — do not repeat or paraphrase it. Only after the caller clearly says yes, call create_booking. A confirmation text goes only if you asked whether they want one and the caller said yes; then set send_confirmation_text true. Never say a text is coming unless the tool result says it was sent.
+- Bookings: identify the service with the caller, then call search_availability with the caller's own words for the day and the time in date_phrase, both of them (${lang === 'th' ? '"พรุ่งนี้บ่ายสาม", not "บ่ายสาม"' : '"tomorrow at 4pm", not "4pm"'}; do not convert them). If it returns needs_clarification, ask that question. Offer at most three times, reading the start_local text exactly. When the caller picks one, call hold_slot with that slot_token and the name the caller gave (if they have not said it, ask: a greeting is not a name). The runtime then reads the exact confirmation sentence aloud itself — do not repeat or paraphrase it. Only after the caller clearly says yes, call create_booking. A confirmation text goes only if you asked whether they want one and the caller said yes; then set send_confirmation_text true. Never say a text is coming unless the tool result says it was sent.
 - If a time is taken (CONFLICT), say so briefly and offer the alternatives the tools give.
 - A NOT_FOUND or AMBIGUOUS error names what was not found and gives the menu: it never means there are no free times.
   Only search_availability's own result says whether a time is free.
@@ -218,6 +288,10 @@ export class Receptionist {
   /** The runtime's own offer of a confirmation text, waiting for the caller's answer. */
   private textOffer: { bookingRef: string } | null = null;
   private textDeclined = false;
+  /** A search in this call found a time taken (no free time asked for, or a CONFLICT): only then may a reply say so. */
+  private takenSeen = false;
+  /** Caller turns whose day or time a date_phrase was already asked to keep (once each, so a model cannot loop). */
+  private phraseNoted = new Set<string>();
 
   private client: ModelClient; private call: Call; private model: string; private business: string; private effort: 'low' | 'medium';
   /** What the simulated transfer does (Gate A model runs: nobody is available; tests may bridge one). */
@@ -334,7 +408,8 @@ export class Receptionist {
       const spoken: string[] = [];
       for (const u of uses) {
         const given = dropNulls(u.input);
-        let problems = [...checkArgs(u.name, given), ...nameProblems(u.name, given), ...this.notOffered(u.name)];
+        // A tool that is not on offer is the first thing to say; then malformed arguments, names and date phrases.
+        let problems = [...this.notOffered(u.name), ...checkArgs(u.name, given), ...this.nameProblems(u.name, given), ...this.phraseProblems(u.name, given)];
         const { input, problems: refProblems } = problems.length ? { input: given, problems: [] } : this.refs.reveal(given);
         if (refProblems.length) { this.events.push('unknown_reference'); problems = refProblems; }
         if (problems.length) {
@@ -346,6 +421,7 @@ export class Receptionist {
           continue;
         }
         const { result, say } = await this.runTool(u.name, input);
+        if ((u.name === 'search_availability' && ['unavailable_with_alternatives', 'none_found'].includes(result.data?.status)) || result.error?.code === 'CONFLICT') this.takenSeen = true;
         const write = u.name === 'create_booking' || u.name === 'reschedule_booking' || (u.name === 'cancel_booking' && input.confirmed === true);
         if (write) writeFailed = !result.ok;
         this.toolLog.push({ name: u.name, input: given, ok: !!result.ok, ...(result.ok ? {} : { code: result.error?.code ?? result.error?.speakable_hint }) });
@@ -364,6 +440,41 @@ export class Receptionist {
   }
 
   private speakCode(text: string) { this.call.say(text); return text; }
+
+  /** A booking name that is a stand-in, or that the caller never said ("คุณสวัส" from "สวัสดีค่ะ"): ask, or leave it out. */
+  private nameProblems(tool: string, a: any): string[] {
+    if (!['hold_slot', 'create_booking', 'log_booking_request'].includes(tool) || typeof a.client_name !== 'string') return [];
+    const callerTexts = this.call.turns.filter(t => t.who === 'caller').map(t => t.text);
+    if (!PLACEHOLDER_NAME.test(a.client_name.trim()) && saidAsName(a.client_name, callerTexts)) return [];
+    this.events.push('name_not_said');
+    return [`arguments.client_name "${a.client_name}" is not a name the caller said in this call: ${a.for_booking_ref
+      ? 'leave it out (the booking already has their name)' : 'ask the caller for their name and use it as they said it'}`];
+  }
+
+  /**
+   * A date_phrase that leaves out a day or a time the caller said (gpt-oss-20b passed "ตอนบ่ายสามโมง" for
+   * "พรุ่งนี้ตอนบ่ายสาม", and the booking landed today, 16 Nov 2026). Only a missing part is flagged, never a different
+   * one (a move names two days), and each caller turn once, so the model cannot loop; the read-back stays the last check.
+   */
+  private phraseProblems(tool: string, a: any): string[] {
+    if (!['search_availability', 'log_booking_request'].includes(tool) || typeof a.date_phrase !== 'string') return [];
+    const now = this.call.now().getTime(), tz = this.call.tz;
+    const asked = mentions(a.date_phrase, now, tz);
+    const callers = this.call.turns.filter(t => t.who === 'caller').reverse();
+    const out: string[] = [];
+    const keep = (part: 'day' | 'time') => {
+      const said = callers.find(t => mentions(t.text, now, tz)[part]);
+      if (!said || this.phraseNoted.has(`${part}:${said.seq}`)) return;
+      const m = mentions(said.text, now, tz);
+      if (part === 'day' && m.date && sameDate(m.date, localParts(now, tz))) return; // "today" is what a bare time means
+      this.phraseNoted.add(`${part}:${said.seq}`);
+      out.push(`arguments.date_phrase "${a.date_phrase}" leaves out the ${part} the caller said ("${said.text.slice(0, 90)}"): pass the caller's own words for the day and the time`);
+    };
+    if (!asked.day) keep('day');
+    if (!asked.time) keep('time');
+    if (out.length) this.events.push('date_phrase_incomplete');
+    return out;
+  }
 
   /** The caller's own request for a text in this call, if any (the latest turn that asks for one). */
   private volunteered(): number | undefined {
@@ -421,6 +532,14 @@ export class Receptionist {
     if (!this.relayed && promisesRelay(text)) return { event: 'relay_promise_without_tool', note: NO_RELAY_MADE, line: {
       th: 'ขออภัยค่ะ เรื่องนี้ยังไม่ได้ส่งถึงทีมงานนะคะ ต้องการให้ดิฉันส่งคำถามนี้ให้ทีมงานแจ้งกลับทางข้อความไหมคะ',
       en: "I'm sorry, this hasn't been sent to the team yet. Would you like me to send your question so they can text you back?" } };
+    const done = claimsDone(text), outcomes = this.call.outcomes;
+    if (done && !(done === 'cancel' ? outcomes.includes('cancelled') : outcomes.includes('booked') || outcomes.includes('rescheduled'))) {
+      return { event: 'completion_claim_without_write', note: NO_WRITE_MADE, line: done === 'cancel'
+        ? { th: 'ขออภัยค่ะ ตอนนี้ยังไม่ได้ยกเลิกนัดให้นะคะ ต้องการให้ยกเลิกนัดไหมคะ', en: "I'm sorry, the booking hasn't been cancelled yet. Would you like me to cancel it?" }
+        : { th: 'ขออภัยค่ะ ตอนนี้ยังไม่ได้จองหรือเปลี่ยนนัดให้นะคะ ขอทวนวันและเวลาที่ต้องการอีกครั้งได้ไหมคะ', en: "I'm sorry, nothing has been booked or changed yet. Could you tell me again the day and time you'd like?" } };
+    }
+    if (!this.takenSeen && claimsTaken(text)) return { event: 'taken_claim_unsearched', note: NO_SEARCH_FOR_TIME, line: {
+      th: 'ขออภัยค่ะ ดิฉันยังไม่ได้เช็กเวลานั้นค่ะ ขอทวนวันและเวลาที่ต้องการอีกครั้งได้ไหมคะ', en: "Sorry, I haven't checked that time yet. Could you tell me the day and time you'd like again?" } };
     return null;
   }
 

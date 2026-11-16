@@ -29,6 +29,8 @@ export class Call {
   token = ''; tenantId = ''; conversationId = ''; lang: 'th' | 'en' = 'th'; ani: string | null = null;
   turns: Array<{ seq: number; who: 'ai' | 'caller'; text: string }> = [];
   callerUtterances = 0; outcomes: string[] = []; corpus: string[] = [];
+  /** The location's time zone, for reading the caller's day and time words as the gateway does. */
+  tz = 'Asia/Bangkok';
   now: () => Date;
 
   constructor(now: () => Date) { this.now = now; }
@@ -54,7 +56,9 @@ export class Call {
         ani: o.ani, lang: call.lang, jurisdiction: country };
       call.token = mintCallToken(call.claims, o.now());
       call.tokenAt = o.now().getTime();
-      return (await tx.query('select name from locations limit 1')).rows[0].name as string;
+      const loc = (await tx.query('select name, time_zone from locations limit 1')).rows[0];
+      call.tz = loc.time_zone;
+      return loc.name as string;
     });
     call.say(T.greeting(name, call.lang, call.recordingOn));
     return { call, unrouted: false };

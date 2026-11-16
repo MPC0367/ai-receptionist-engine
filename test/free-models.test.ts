@@ -153,7 +153,7 @@ test('a label the tools never gave (or a mangled real token) is refused before t
   let step = 0;
   brain = () => ++step === 1 ? tool('hold_slot', { slot_token: 'S9', client_name: 'มด' }) : step === 2 ? tool('cancel_booking', { booking_ref: 'eyJ0IjoiMTEx.forged', confirmed: true }) : text('ขอเช็กอีกครั้งนะคะ');
   const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
-  assert.equal(await rec.respond('จองเวลาเมื่อกี้เลยค่ะ'), 'ขออภัยค่ะ รายการนี้ยังไม่สำเร็จ ยังไม่มีการเปลี่ยนแปลงใดๆ นะคะ', 'after a refused cancellation the runtime, not the model, speaks');
+  assert.equal(await rec.respond('จองเวลาเมื่อกี้เลยค่ะ ชื่อมดค่ะ'), 'ขออภัยค่ะ รายการนี้ยังไม่สำเร็จ ยังไม่มีการเปลี่ยนแปลงใดๆ นะคะ', 'after a refused cancellation the runtime, not the model, speaks');
   assert.deepEqual(rec.events, ['unknown_reference', 'invalid_tool_call', 'unknown_reference', 'invalid_tool_call', 'unconfirmed_write']);
   assert.match(rec.toolLog[0].problems![0], /slot_token "S9" was not given by a tool/);
   assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from holds`)).rows[0].n), 0);
@@ -271,7 +271,7 @@ test('a placeholder for the caller\'s name is refused: the model must ask', asyn
   };
   const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
   assert.equal(await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ'), 'ขอทราบชื่อผู้จองด้วยค่ะ');
-  assert.match(rec.toolLog[1].problems![0], /is not a name the caller gave/);
+  assert.match(rec.toolLog[1].problems![0], /is not a name the caller said/);
   assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from holds`)).rows[0].n), 0);
 });
 
@@ -296,7 +296,7 @@ test('a reschedule: the hold names both times, only reschedule_booking is offere
     const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
     if (step === 1) return tool('get_bookings_for_caller', {});
     if (step === 2) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: '21 พ.ย. 69 บ่ายสาม', for_booking_ref: tr.data.bookings[0].booking_ref });
-    if (step === 3) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'บี', for_booking_ref: 'B1' });
+    if (step === 3) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, for_booking_ref: 'B1' }); // a move keeps the booking's name
     if (step === 4) return tool('create_booking', { hold_ref: 'H1', client_name: 'บี' });
     return text('เลื่อนนัดเรียบร้อยแล้วค่ะ');
   };
@@ -642,4 +642,138 @@ test('an Ollama reply carries its model-loading time apart, so a swapped-in mode
   const r = fromOllama({ message: { content: 'สวัสดีค่ะ' }, done_reason: 'stop', prompt_eval_count: 900, eval_count: 12, load_duration: 3_250_000_000 }, stats);
   assert.equal(r.usage.load_ms, 3250);
   assert.equal(fromOllama({ message: { content: 'ok' }, done_reason: 'stop' }, stats).usage.load_ms, 0);
+});
+
+// The four gaps gpt-oss-20b exposed (16 Nov 2026), each from its own transcript.
+
+test('claimsDone: "it is booked" caught (real replies); questions, refusals, conditions and "I checked" kept', async () => {
+  const { claimsDone } = await import('../sim/model/receptionist.ts');
+  for (const [line, kind] of [
+    ['Your booking is confirmed for tomorrow at 4 pm. Have a relaxing visit! Goodbye.', 'booking'], // gpt-oss, nothing booked
+    ['Your appointment is confirmed.', 'booking'], ["You're all set for tomorrow.", 'booking'], ["I've booked you in with Nok.", 'booking'],
+    ['จองเรียบร้อยแล้วค่ะ มีอะไรให้ช่วยเพิ่มเติมไหมคะ?', 'booking'], ['ยืนยันการเลื่อนนัดให้เรียบร้อยแล้วค่ะ', 'booking'],
+    ['ขอบคุณค่ะจองสำเร็จแล้วค่ะ', 'booking'], ['นัดของคุณถูกยกเลิกแล้วค่ะ', 'cancel'],
+  ] as const) assert.equal(claimsDone(line), kind, line);
+  for (const line of ['ยืนยันจองเลยไหมคะ', 'ยังไม่ได้จองนะคะ', 'ขออภัยค่ะ ไม่สามารถจองได้ค่ะ', 'Shall I book it?', "Your appointment isn't confirmed yet.",
+    "Once it's confirmed, you'll get a text.", 'Your appointment is on Friday 20 November.',
+    'ตรวจสอบข้อมูลการจองให้แล้วค่ะ คุณบีต้องการเลื่อนนัดจากวันที่ 20 เป็นวันที่ 21 ใช่ไหมคะ?']) assert.equal(claimsDone(line), null, line);
+});
+
+test('claimsTaken: "that time is not free" caught; staff not free and questions kept', async () => {
+  const { claimsTaken } = await import('../sim/model/receptionist.ts');
+  for (const line of ['ขออภัยค่ะ ขณะนี้ไม่มีเวลาที่บ่ายสามโมงในวันที่ 21 พฤศจิกายน แต่เรามีสามเวลาที่คุณสามารถเลือกได้', // gpt-oss, never searched
+    'บ่ายสามไม่ว่างค่ะ', "4 pm isn't available, but 5 pm is.", "Sorry, we're fully booked tomorrow."]) assert.ok(claimsTaken(line), line);
+  for (const line of ['ขออภัยค่ะ ขณะนี้เจ้าหน้าที่ไม่ว่างรับสาย ให้ดิฉันช่วยเลื่อนนัดให้ไหมคะ', 'No one is available to take your call right now.',
+    'บ่ายสามว่างไหมคะ?', 'Is 4 pm free for you?', 'บ่ายสามว่างค่ะ']) assert.ok(!claimsTaken(line), line);
+});
+
+test('saidAsName: whole words the caller said, so a greeting is not a name', async () => {
+  const { saidAsName } = await import('../sim/model/receptionist.ts');
+  assert.ok(!saidAsName('คุณสวัส', ['สวัสดีค่ะ อยากจองนวดไทยค่ะ']), '"สวัส" is part of "สวัสดี"');
+  assert.ok(!saidAsName('คู่นี้', ['สวัสดีค่ะ จองนวดไทยพรุ่งนี้ค่ะ']));
+  assert.ok(!saidAsName('คุ', ['คุณคะ ขอจองหน่อยค่ะ']));
+  assert.ok(saidAsName('มด', ['ดิฉันชื่อมดค่ะ']));
+  assert.ok(saidAsName('คุณต้น', ['ผมชื่อต้นครับ']));
+  assert.ok(saidAsName('ณัฐดนัย', ['ผมชื่อณัฐดนัยครับ']), 'a name segmented in two pieces still starts and ends on word edges');
+  assert.ok(saidAsName('Sam', ['My name is Sam.']) && saidAsName('Khun Sam', ['It\'s Sam here']));
+  assert.ok(!saidAsName('Samantha', ['My name is Sam.']) && !saidAsName('Sam', ['Samantha here']));
+});
+
+test('a booking said to be done with nothing written: asked again with a note, then the runtime tells the truth', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, lang: 'en', now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  brain = () => text('Your booking is confirmed for tomorrow at 4 pm. Have a relaxing visit!');
+  bodies.length = 0;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('My name is Sam. A Thai massage tomorrow around 4pm, please.'),
+    "I'm sorry, nothing has been booked or changed yet. Could you tell me again the day and time you'd like?");
+  assert.deepEqual(rec.events, ['completion_claim_without_write', 'completion_claim_without_write']);
+  assert.match(bodies[1].body.messages[0].content, /none was made in this call/);
+  assert.ok(!call.turns.some(t => t.who === 'ai' && /is confirmed/.test(t.text)));
+});
+
+test('after a real booking, saying it is booked is the truth', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  brain = msgs => {
+    const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    const said = [...msgs].reverse().find((m: any) => m.role === 'user')?.content ?? '';
+    if (tr?.data?.options) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'มด' });
+    if (said.startsWith('ขอจอง')) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+    if (said.startsWith('ใช่')) return tool('create_booking', { hold_ref: 'H1', client_name: 'มด' });
+    return text('การจองเรียบร้อยแล้วค่ะ ขอบคุณที่ใช้บริการค่ะ');
+  };
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.match(await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ ชื่อมดค่ะ'), /^ขอทวนนะคะ/);
+  assert.match(await rec.respond('ใช่ค่ะ'), /^จองเรียบร้อยแล้วค่ะ/);
+  assert.match(await rec.respond('ไม่ต้องค่ะ'), /ไม่ส่งข้อความ/);
+  assert.equal(await rec.respond('ขอบคุณค่ะ'), 'การจองเรียบร้อยแล้วค่ะ ขอบคุณที่ใช้บริการค่ะ');
+  assert.ok(!rec.events.includes('completion_claim_without_write'));
+});
+
+test('"that time is taken" after a search that never checked it: asked again, then the runtime says it has not checked', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = () => ++step === 1 ? tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: '21 พฤศจิกายน' })
+    : text('ขออภัยค่ะ ขณะนี้ไม่มีเวลาที่บ่ายสามโมงในวันที่ 21 พฤศจิกายน');
+  bodies.length = 0;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('ขอจองนวดไทย 60 วันที่ 21 พฤศจิกายนค่ะ'), 'ขออภัยค่ะ ดิฉันยังไม่ได้เช็กเวลานั้นค่ะ ขอทวนวันและเวลาที่ต้องการอีกครั้งได้ไหมคะ');
+  assert.deepEqual(rec.events, ['taken_claim_unsearched', 'taken_claim_unsearched']);
+  assert.match(bodies.at(-1)!.body.messages[0].content, /no search in this call found that/);
+});
+
+test('a date_phrase that drops the caller\'s day or time is refused once, with their words; empty optional fields are not given', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = () => {
+    step++;
+    if (step === 1) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'ตอนบ่ายสามโมง', for_booking_ref: '', staff_ref: '' });
+    if (step === 2) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้ตอนบ่ายสาม', for_booking_ref: '', staff_ref: '' });
+    return text('ขอเช็กให้นะคะ');
+  };
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  await rec.respond('สวัสดีค่ะ อยากจองนวดไทย 60 นาที สำหรับวันพรุ่งนี้ตอนบ่ายสามค่ะ');
+  assert.equal(rec.toolLog[0].code, 'INVALID_ARGUMENTS');
+  assert.match(rec.toolLog[0].problems![0], /leaves out the day the caller said \("สวัสดีค่ะ อยากจองนวดไทย 60 นาที สำหรับวันพรุ่งนี้/);
+  assert.ok(rec.toolLog[1].ok, 'the day kept, and "" for for_booking_ref and staff_ref read as not given');
+  assert.ok(!rec.events.includes('unknown_reference'));
+
+  // The time left out of a move, as gpt-oss did ("21 พฤศจิกายน" for "21 พฤศจิกายน เวลาบ่ายสามโมง"); once per caller turn.
+  step = 0;
+  brain = () => ++step <= 2 ? tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: '21 พฤศจิกายน' }) : text('ค่ะ');
+  await rec.respond('ขอเป็นวันที่ 21 พฤศจิกายน เวลาบ่ายสามโมงแทนได้ไหมคะ');
+  assert.match(rec.toolLog[2].problems![0], /leaves out the time the caller said/);
+  assert.ok(rec.toolLog[3].ok, 'asked once: the second try goes through, and the read-back is the last check');
+
+  // "Today" is what a bare time means: nothing to keep.
+  step = 0;
+  brain = () => ++step === 1 ? tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'บ่ายสาม' }) : text('ค่ะ');
+  await rec.respond('วันนี้บ่ายสามได้ไหมคะ');
+  assert.ok(rec.toolLog[4].ok);
+});
+
+test('a name the caller never said is refused, even one taken from a greeting', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = msgs => {
+    step++;
+    const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    if (step === 1) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+    if (step === 2) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'คุณสวัส' });
+    return text('ขอทราบชื่อผู้จองด้วยค่ะ');
+  };
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('สวัสดีค่ะ ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ'), 'ขอทราบชื่อผู้จองด้วยค่ะ');
+  assert.match(rec.toolLog[1].problems![0], /"คุณสวัส" is not a name the caller said in this call: ask the caller for their name/);
+  assert.ok(rec.events.includes('name_not_said'));
+  assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from holds`)).rows[0].n), 0);
 });
