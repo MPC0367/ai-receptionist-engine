@@ -58,7 +58,8 @@ function resolveDate(p: string, today: LocalDate): { date?: LocalDate; clarify?:
     const names = [EN_MONTHS[i], TH_MONTHS[i], TH_MONTHS_ABBR[i]];
     for (const name of names) {
       const esc = name.replace(/\./g, '\\.');
-      const m = p.match(new RegExp(`(\\d{1,2})\\s*${esc}\\s*(\\d{2,4})?`)) ?? p.match(new RegExp(`${esc}\\s*(\\d{1,2})(?:,?\\s*(\\d{4}))?`));
+      // "21 พ.ย.", "21st of December", "December 21st, 2026".
+      const m = p.match(new RegExp(`(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:of\\s+)?${esc}\\s*(\\d{2,4})?`)) ?? p.match(new RegExp(`${esc}\\s*(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s*(\\d{4}))?`));
       if (m) {
         let y = m[2] ? yearToCe(+m[2], thai) : today.y;
         let date = { y, m: i + 1, d: +m[1] };
@@ -66,6 +67,23 @@ function resolveDate(p: string, today: LocalDate): { date?: LocalDate; clarify?:
         return { date };
       }
     }
+  }
+
+  // A day of the month with no month named ("วันที่ 21", "วันศุกร์ที่ 20", "the 21st"): that day this month, or next month
+  // once it has passed. It used to fall through to today (with a time) or to the coming weekday with the number ignored:
+  // gpt-oss-20b wrote the month as "พรรณิกายน" and the runtime read back the call's own day (16 Nov 2026).
+  const dom = p.match(new RegExp(`(?:วันที่|(?:${TH_WEEKDAYS.join('|')})(?:บดี)?ที่)\\s*(\\d{1,2})(?![\\d:.])`)) ??
+    p.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/) ?? p.match(/\bon the (\d{1,2})\b(?![:.]\d)/);
+  if (dom) {
+    const n = +dom[1];
+    const date = n >= today.d ? { y: today.y, m: today.m, d: n } : today.m === 12 ? { y: today.y + 1, m: 1, d: n } : { y: today.y, m: today.m + 1, d: n };
+    if (n < 1 || n > new Date(Date.UTC(date.y, date.m, 0)).getUTCDate()) return { clarify: { status: 'needs_clarification', reason: 'no_date' } };
+    // A weekday said with it must agree ("วันพฤหัสที่ 20" when the 20th is a Friday): ask which they mean.
+    const wd = [...Array(7).keys()].find(i => new RegExp(`\\b${EN_WEEKDAYS[i]}\\b|${TH_WEEKDAYS[i]}`).test(p));
+    if (wd !== undefined && wd + 1 !== isoWeekday(date)) {
+      return { clarify: { status: 'needs_clarification', reason: 'which_weekday', options: [{ date }, { date: addDays(today, (wd + 1 - isoWeekday(today) + 7) % 7) }] } };
+    }
+    return { date };
   }
 
   for (let i = 0; i < 7; i++) {

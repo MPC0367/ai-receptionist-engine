@@ -174,13 +174,16 @@ mid-run when the lid closed (Gemma's M07 shows 204 s a call: the pause, not the 
 double booking: it wrote the month as "พรรณิกายน", the runtime read back a move to Thursday 12 Nov, the caller said
 "ไม่ใช่ 12", and the yes rule moved nothing. That exposed a fault in the resolver itself:
 
-- **A day of the month without a month name is read as today.** `resolveWhen` at 10:00 on 12 Nov: "วันที่ 21 บ่ายสาม"
-  → 12 Nov 15:00, "the 21st at 3pm" → 12 Nov 15:00, and "วันศุกร์ที่ 20 บ่ายสาม" → Fri 13 Nov (the "20" ignored). Not
-  fixed. Callers say "วันที่ 21" all the time; every route and model goes through it.
+- **A day of the month without a month name was read as today.** `resolveWhen` at 10:00 on 12 Nov: "วันที่ 21 บ่ายสาม"
+  → 12 Nov 15:00, "the 21st at 3pm" → 12 Nov 15:00, and "วันศุกร์ที่ 20 บ่ายสาม" → Fri 13 Nov (the "20" ignored). Callers say
+  "วันที่ 21" all the time; every route and model goes through it. **Fixed the same day ("Yes, fix it"):** a bare day
+  of the month ("วันที่ 21", "วันศุกร์ที่ 20", "the 21st", "on the 21") is that day this month, or next month once it
+  has passed; a day the month lacks ("วันที่ 31" in November) and a weekday that disagrees ("วันพฤหัสที่ 20", a Friday)
+  are asked, never guessed; "the 21st of December" now reads its month. Of the 72 date phrases in the saved runs, only
+  gpt-oss's five "21 พรรณิกายน" read differently (12 Nov → 21 Nov). 123 tests.
 
 ### Still open
 
-- **The resolver reads a bare day of the month as today** (above).
 - **Vaguer promises** such as "เดี๋ยวฉันประสานงานให้" (I'll coordinate it) after a refused transfer are not caught: too
   loose to read reliably.
 - **A words-only reply thrown away for a claim** leaves the caller with "ระบบขัดข้องเล็กน้อย" — safe, but blunt.

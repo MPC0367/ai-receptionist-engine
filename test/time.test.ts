@@ -58,3 +58,27 @@ test('AT-09 US daylight saving: nonexistent times are rejected, repeated times t
   const bkk = localToUtc({ y: 2026, m: 11, d: 13, h: 15, mi: 0 }, BKK);
   assert.equal(bkk.ok && new Date(bkk.utcMs).toISOString(), '2026-11-13T08:00:00.000Z');
 });
+
+test('a day of the month without a month: that day this month, or next once passed; a weekday said with it must agree', () => {
+  const r = (p: string) => resolveWhen(p, { nowUtcMs: thu10, tz: BKK, hoursOn: hours10to20 });
+  // Read as today (or the coming Friday) until 16 Nov 2026: gpt-oss-20b wrote "พรรณิกายน" for พฤศจิกายน.
+  assert.deepEqual(r('วันที่ 21 บ่ายสาม'), { status: 'ok', date: { y: 2026, m: 11, d: 21 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('วันที่ 21 พรรณิกายน ตอนบ่ายสามโมง'), { status: 'ok', date: { y: 2026, m: 11, d: 21 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('วันศุกร์ที่ 20 บ่ายสาม'), { status: 'ok', date: { y: 2026, m: 11, d: 20 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('the 21st at 3pm'), { status: 'ok', date: { y: 2026, m: 11, d: 21 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('on the 21 at 3pm'), { status: 'ok', date: { y: 2026, m: 11, d: 21 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('วันที่ 12 บ่ายสาม'), { status: 'ok', date: { y: 2026, m: 11, d: 12 }, time: { h: 15, mi: 0 } }, 'today is today');
+  assert.deepEqual(r('วันที่ 5 บ่ายสาม'), { status: 'ok', date: { y: 2026, m: 12, d: 5 }, time: { h: 15, mi: 0 } }, 'passed: next month');
+  assert.equal(resolveWhen('วันที่ 3 บ่ายสาม', { nowUtcMs: Date.parse('2026-12-20T03:00:00Z'), tz: BKK, hoursOn: hours10to20 }).status === 'ok' &&
+    (resolveWhen('วันที่ 3 บ่ายสาม', { nowUtcMs: Date.parse('2026-12-20T03:00:00Z'), tz: BKK, hoursOn: hours10to20 }) as any).date.y, 2027, 'December rolls into January');
+  const r31 = r('วันที่ 31 บ่ายสาม');
+  assert.equal(r31.status === 'needs_clarification' && r31.reason, 'no_date', 'November has no 31st: ask');
+  const mismatch = r('วันพฤหัสที่ 20 บ่ายสาม');
+  assert.equal(mismatch.status === 'needs_clarification' && mismatch.reason, 'which_weekday', 'the 20th is a Friday: ask which');
+  // Month names with ordinals, and the forms that already worked.
+  assert.deepEqual(r('21st of December at 3pm'), { status: 'ok', date: { y: 2026, m: 12, d: 21 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('December 21st at 3pm'), { status: 'ok', date: { y: 2026, m: 12, d: 21 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('20 พ.ย. 69 บ่ายสาม'), { status: 'ok', date: { y: 2026, m: 11, d: 20 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('วันศุกร์นี้บ่ายสาม'), { status: 'ok', date: { y: 2026, m: 11, d: 13 }, time: { h: 15, mi: 0 } });
+  assert.deepEqual(r('บ่ายสาม'), { status: 'ok', date: { y: 2026, m: 11, d: 12 }, time: { h: 15, mi: 0 } }, 'a bare time is still today');
+});
