@@ -779,3 +779,81 @@ test('a name the caller never said is refused, even one taken from a greeting', 
   assert.ok(rec.events.includes('name_not_said'));
   assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from holds`)).rows[0].n), 0);
 });
+
+test('asksToMove: a move of an appointment they have (real callers); a different time while booking, or a refusal, is not', async () => {
+  const { asksToMove, asksForAnother } = await import('../sim/model/receptionist.ts');
+  for (const line of ['สวัสดีค่ะ ขอสายคุณพนักงานหน่อยค่ะ พอดีจะขอเลื่อนนัดค่ะ', 'ขอเลื่อนเป็นวันที่ 21 พฤศจิกายน เวลาบ่ายสามโมงเดิมได้ไหมคะ?',
+    'อยากเปลี่ยนนัดค่ะ', "I'd like to reschedule my massage.", 'Can I move my appointment to Saturday?']) assert.ok(asksToMove(line), line);
+  for (const line of ['งั้นเปลี่ยนเป็นวันพฤหัสบดีตอนบ่ายสามโมงแทนได้ไหมครับ?', 'ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ', 'ไม่ได้จะเลื่อนค่ะ',
+    "I'd like to book a massage tomorrow.", "I don't want to move it."]) assert.ok(!asksToMove(line), line);
+  assert.ok(asksForAnother('ขอจองเพิ่มอีกนัดค่ะ') && asksForAnother("I'd like another appointment as well.") && !asksForAnother('ขอเลื่อนนัดค่ะ'));
+});
+
+test('a move made as a new booking is refused: look the booking up, then move it; the caller never has two', async () => {
+  const clock = await fresh();
+  const pre = (await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() })).call;
+  await pre.book({ service: 'นวดไทย 60', when: '20 พ.ย. 69 บ่ายสาม', name: 'บี' });
+  await pre.end();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0, slot = '';
+  brain = msgs => {
+    step++;
+    const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    if (tr?.data?.options) slot = tr.data.options[0].slot_token;
+    // gpt-oss's way, 16 Nov 2026: search and hold as a new booking, never looking the old one up.
+    if (step === 1) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: '21 พ.ย. 69 บ่ายสาม' });
+    if (step === 2) return tool('hold_slot', { slot_token: slot, client_name: 'บี' });
+    if (step === 3) return tool('get_bookings_for_caller', {});
+    if (step === 4) return tool('hold_slot', { slot_token: slot, client_name: 'บี' });
+    if (step === 5) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: '21 พ.ย. 69 บ่ายสาม', for_booking_ref: 'B1' });
+    if (step === 6) return tool('hold_slot', { slot_token: slot, for_booking_ref: 'B1' });
+    if (step === 7) return tool('reschedule_booking', { booking_ref: 'B1', hold_ref: 'H1' });
+    return text('ค่ะ');
+  };
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  const confirm = await rec.respond('ชื่อบีค่ะ ขอเลื่อนนัดจากวันที่ 20 เป็นวันที่ 21 พ.ย. 69 บ่ายสามค่ะ');
+  assert.match(rec.toolLog[1].problems![0], /call get_bookings_for_caller first/);
+  assert.match(rec.toolLog[3].problems![0], /has 1 booking and asked to move one.*for_booking_ref/);
+  assert.match(confirm, /^ขอทวนนะคะ: เลื่อนนัด/, 'the hold that went through is a move');
+  assert.match(await rec.respond('ใช่ค่ะ'), /^เลื่อนนัดเรียบร้อยแล้วค่ะ/);
+  const rows = await withTenant(A, async tx => (await tx.query(`select starts_at, status from appointments where status <> 'cancelled'`)).rows);
+  assert.equal(rows.length, 1, 'one appointment, moved');
+  assert.equal(new Date(rows[0].starts_at).toISOString(), '2026-11-21T08:00:00.000Z');
+  assert.equal(rec.events.filter(e => e === 'move_as_new_booking').length, 2);
+});
+
+test('a "move" with no booking to move, or a second appointment asked for, may be booked as new', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = msgs => {
+    step++;
+    const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    if (step === 1) return tool('get_bookings_for_caller', {});
+    if (step === 2) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+    if (step === 3) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'บี' });
+    return text('ค่ะ');
+  };
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.match(await rec.respond('ชื่อบีค่ะ ขอเลื่อนนัดเป็นพรุ่งนี้บ่ายสามค่ะ'), /^ขอทวนนะคะ: นวดไทย 60 นาที/, 'no booking found: nothing to move');
+  assert.ok(!rec.events.includes('move_as_new_booking'));
+
+  // A caller with a booking who, after asking to move, wants a second appointment as well.
+  const clock2 = await fresh();
+  const pre = (await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock2.now() })).call;
+  await pre.book({ service: 'นวดไทย 60', when: '20 พ.ย. 69 บ่ายสาม', name: 'บี' });
+  await pre.end();
+  const second = (await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock2.now() })).call;
+  step = 0;
+  const rec2 = new Receptionist(client, second, 'stand-in', 'ร้านสปาตัวอย่าง');
+  brain = () => ++step === 1 ? tool('get_bookings_for_caller', {}) : text('มีนัดวันที่ 20 อยู่ค่ะ ต้องการเลื่อน หรือจองเพิ่มคะ');
+  await rec2.respond('ชื่อบีค่ะ ขอเลื่อนนัดค่ะ');
+  step = 0;
+  brain = msgs => { step++; const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    return step === 1 ? tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' })
+      : step === 2 ? tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'บี' }) : text('ค่ะ'); };
+  assert.match(await rec2.respond('ไม่เลื่อนแล้วค่ะ ขอจองเพิ่มอีกนัด พรุ่งนี้บ่ายสามค่ะ'), /^ขอทวนนะคะ: นวดไทย 60 นาที/, 'a second appointment, asked for');
+  assert.ok(!rec2.events.includes('move_as_new_booking'));
+});

@@ -120,6 +120,21 @@ function wholeWordIn(w: string, text: string): boolean {
   return false;
 }
 
+/**
+ * The caller asking to move an appointment they already have ("ขอเลื่อนนัด", "เปลี่ยนนัด", "reschedule my massage"),
+ * not to change the time they are asking for ("เปลี่ยนเป็นวันพฤหัส" while booking). gpt-oss-20b, asked to move the 20 Nov
+ * appointment, never looked it up and booked 21 Nov as a new one: the caller was left with two (16 Nov 2026).
+ */
+export function asksToMove(t: string): boolean {
+  if (/ไม่(ได้)?(จะ|ต้องการ|อยาก)?\s*(เลื่อน|เปลี่ยนนัด|ย้ายนัด)|ไม่ใช่(การ)?เลื่อน|\b(not|don'?t want to|no need to)\s+(reschedul\w*|move|change)\b/i.test(t)) return false;
+  return /เลื่อน|เปลี่ยน(วัน|เวลา)?นัด|ย้าย(วัน|เวลา)?นัด/.test(t) ||
+    /\breschedul\w*|\b(move|change|shift)\s+(my|the|our|that|this)\s+(booking|appointment|reservation|massage)\b/i.test(t);
+}
+/** The caller wanting another appointment as well ("จองเพิ่ม", "อีกนัด", "a second appointment"): a new booking is then theirs. */
+export function asksForAnother(t: string): boolean {
+  return /จองเพิ่ม|นัดเพิ่ม|อีก(นัด|คิว)|เพิ่มอีก(นัด|คิว)/.test(t) || /\b(another|second|additional|extra|separate) (booking|appointment)\b|\bas well\b/i.test(t);
+}
+
 const NO_WRITE_MADE = `
 
 Your last reply told the caller a booking, a move or a cancellation was done, but none was made in this call. Nothing
@@ -296,6 +311,8 @@ export class Receptionist {
   private takenSeen = false;
   /** Caller turns whose day or time a date_phrase was already asked to keep (once each, so a model cannot loop). */
   private phraseNoted = new Set<string>();
+  /** How many future bookings get_bookings_for_caller found for this number (null: not looked up in this call). */
+  private callerBookings: number | null = null;
 
   private client: ModelClient; private call: Call; private model: string; private business: string; private effort: 'low' | 'medium';
   /** What the simulated transfer does (Gate A model runs: nobody is available; tests may bridge one). */
@@ -413,7 +430,7 @@ export class Receptionist {
       for (const u of uses) {
         const given = dropNulls(u.input);
         // A tool that is not on offer is the first thing to say; then malformed arguments, names and date phrases.
-        let problems = [...this.notOffered(u.name), ...checkArgs(u.name, given), ...this.nameProblems(u.name, given), ...this.phraseProblems(u.name, given)];
+        let problems = [...this.notOffered(u.name), ...checkArgs(u.name, given), ...this.moveProblems(u.name, given), ...this.nameProblems(u.name, given), ...this.phraseProblems(u.name, given)];
         const { input, problems: refProblems } = problems.length ? { input: given, problems: [] } : this.refs.reveal(given);
         if (refProblems.length) { this.events.push('unknown_reference'); problems = refProblems; }
         if (problems.length) {
@@ -444,6 +461,22 @@ export class Receptionist {
   }
 
   private speakCode(text: string) { this.call.say(text); return text; }
+
+  /**
+   * A new-booking hold while the caller is asking to move one they have: refused until their bookings are looked up,
+   * and while one exists, until it is moved or the caller asks for another appointment as well. A move goes through
+   * for_booking_ref, so the old time is released in the same step and the caller never ends up with two.
+   */
+  private moveProblems(tool: string, a: any): string[] {
+    if (tool !== 'hold_slot' || a.for_booking_ref || this.call.outcomes.includes('rescheduled')) return [];
+    const callers = this.call.turns.filter(t => t.who === 'caller');
+    const move = callers.findLast(t => asksToMove(t.text)), another = callers.findLast(t => asksForAnother(t.text));
+    if (!move || (another && another.seq > move.seq) || this.callerBookings === 0) return [];
+    this.events.push('move_as_new_booking');
+    return [this.callerBookings === null
+      ? `the caller asked to move an appointment they have ("${move.text.slice(0, 90)}"): call get_bookings_for_caller first, then move it with for_booking_ref (search, hold, then reschedule_booking)`
+      : `the caller has ${this.callerBookings} booking${this.callerBookings > 1 ? 's' : ''} and asked to move one ("${move.text.slice(0, 90)}"): search and hold with for_booking_ref set to its label, then reschedule_booking. A hold without it makes a second appointment; if the caller wants one as well, ask them first`];
+  }
 
   /** A booking name that is a stand-in, or that the caller never said ("คุณสวัส" from "สวัสดีค่ะ"): ask, or leave it out. */
   private nameProblems(tool: string, a: any): string[] {
@@ -611,7 +644,10 @@ export class Receptionist {
       return { result: r };
     }
     const r = await this.call.tool(name, input);
-    if (name === 'get_bookings_for_caller' && r.ok) for (const b of r.data.bookings ?? []) this.versions.set(b.booking_ref, b.version);
+    if (name === 'get_bookings_for_caller' && r.ok) {
+      this.callerBookings = (r.data.bookings ?? []).length;
+      for (const b of r.data.bookings ?? []) this.versions.set(b.booking_ref, b.version);
+    }
     if (name === 'hold_slot' && r.ok) {
       const text = this.call.lang === 'th' ? r.data.rendered_confirmation.th : r.data.rendered_confirmation.en;
       this.lastHold = { ref: r.data.hold_ref, rendered: r.data.rendered_confirmation, spokenTurn: this.call.say(text), forBooking: input.for_booking_ref };
