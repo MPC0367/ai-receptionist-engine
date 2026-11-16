@@ -20,6 +20,8 @@ const agreedToText = (call: Call) => call.turns.some((t, i) => t.who === 'caller
   (volunteersText(t.text) || (yesNo(t.text) === 'yes' && call.turns.slice(0, i).reverse().find(x => x.who === 'ai') && asksAboutText(call.turns.slice(0, i).reverse().find(x => x.who === 'ai')!.text))));
 /** Texts queued to the caller's number during the scenario (booking confirmations, answers). */
 const textsTo = async (tenant: string, ani: string) => Number((await q(tenant, `select count(*)::int n from outbox_events where payload->>'to' = $1`, [ani]))[0].n);
+/** The calendar day in Bangkok (UTC+7, no daylight saving) of a stored timestamp, as YYYY-MM-DD. */
+export const bangkokDay = (t: string | Date) => new Date(new Date(t).getTime() + 7 * 3600_000).toISOString().slice(0, 10);
 const check = (pairs: Array<[boolean, string]>) => ({ pass: pairs.every(([ok]) => ok), why: pairs.filter(([ok]) => !ok).map(([, w]) => w) });
 
 export function scenarios(A: string): Scenario[] {
@@ -38,7 +40,10 @@ export function scenarios(A: string): Scenario[] {
       persona: 'คุณชื่อ "ต้น" ขอจองนวดเท้าพรุ่งนี้ "สามโมง" (ไม่บอกว่าเช้าหรือบ่าย) ถ้าถูกถามให้ตอบว่าบ่ายสาม ตกลงเวลาที่เสนอ แล้ววางสาย',
       grade: async (call) => {
         const ap = await q(A, `select starts_at from appointments where created_by_conversation = $1`, [call.conversationId]);
-        return check([[ap.length === 1 && new Date(ap[0].starts_at).getUTCHours() === 8, 'booked at 15:00 local, not 09:00']]);
+        // The day as well as the hour (found 16 Nov 2026: gpt-oss-20b dropped "พรุ่งนี้" and booked today at 15:00, which
+        // the hour check alone passed).
+        return check([[ap.length === 1 && new Date(ap[0].starts_at).getUTCHours() === 8, 'booked at 15:00 local, not 09:00'],
+          [ap.length === 1 && bangkokDay(ap[0].starts_at) === '2026-11-13', 'booked tomorrow (Fri 13 Nov), not today']]);
       } },
     { id: 'M03-unknown-question', lang: 'th', ani: '+66812340003',
       persona: 'คุณชื่อ "แพร" ถามว่าร้านมีที่จอดรถไหม ถ้าพนักงานบอกว่าไม่แน่ใจและเสนอส่งคำถามให้ทีมงาน ให้ตกลง ยืนยันว่าคำถามถูกต้อง ใช้เบอร์ที่โทรมา และอนุญาตให้ส่งข้อความ แล้ววางสาย',
@@ -72,7 +77,8 @@ export function scenarios(A: string): Scenario[] {
       persona: 'Your name is Sam. Book a 60-minute Thai massage for tomorrow afternoon around 4pm. Accept the first time offered. No text confirmation. Then hang up.',
       grade: async (call) => {
         const ap = await q(A, `select starts_at from appointments where created_by_conversation = $1`, [call.conversationId]);
-        return check([[ap.length === 1, 'exactly one booking'], [said(call, /^To confirm:/), 'English confirmation spoken by the runtime'],
+        return check([[ap.length === 1, 'exactly one booking'], [ap.length === 1 && bangkokDay(ap[0].starts_at) === '2026-11-13', 'booked tomorrow (Fri 13 Nov)'],
+          [said(call, /^To confirm:/), 'English confirmation spoken by the runtime'],
           [await textsTo(A, '+66812340008') === 0, 'no text: the caller did not want one']]);
       } },
   ];

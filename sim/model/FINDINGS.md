@@ -96,17 +96,46 @@ words; a move's summary text read "เลื่อนนัด… เลื่�
 booking by cancelling it and rebooking, leaving the caller with nothing when the rebooking failed — a cancelled booking
 can no longer be moved (the error points to a new booking) and the prompt forbids cancel-and-rebook.
 
+## 16 Nov 2026 — gpt-oss-20b against Gemma 4 12B (the owner's "Yes, download it")
+
+`gpt-oss:20b` (13 GB, OpenAI's open-weight model, reasoning "low") as the receptionist, the caller fixed at `gemma4:12b`
+as before, code `b264c80`. Run on battery in macOS Low Power Mode (the Mac's own setting, not changed), so for the times
+Gemma was re-run on three scenarios under the same conditions. The first attempt stopped after two scenarios when the
+lid closed (Clamshell Sleep at 23:01; every later call timed out); the run below was made again with `caffeinate`.
+
+| | gpt-oss-20b | Gemma 4 12B |
+|---|---|---|
+| Passed (graders checking the day, below) | **8/16** | 14/16 in its last full run; 3/3 on the re-run |
+| Thai bookings on the right day | **0 of 4** (all booked "today" for "พรุ่งนี้") | every one, in all nine runs |
+| Invalid tool calls | 27 in 105 calls | 2 in 20 calls (re-run) |
+| Mean time per call, Low Power Mode | 8.7 s; **4.8 s without loading** | 6.4 s (one model loaded, no swaps) |
+
+The two models do not fit in the Mac's GPU together, so gpt-oss's 8.7 s includes Ollama swapping it with the Gemma
+caller; on a phone line only the receptionist runs, so 4.8 s is the fair figure: about Gemma's speed, still not a
+live-call speed. gpt-oss writes its Thai with mixed ค่ะ/ครับ and ฉัน/ผม in one reply, and stiffer phrasing than Gemma.
+
+**The grader gap it exposed (fixed):** M02 and M08 checked the hour, not the day, so M02 passed gpt-oss's booking for
+today. Both now require Friday 13 Nov (`bangkokDay` in `scenarios.ts`). Every earlier Gemma booking was on the right
+day (checked in the saved transcripts), so its results stand.
+
+**What gpt-oss did, and which of it our runtime let through:**
+
+| Seen | Runtime | 
+|---|---|
+| **"Your booking is confirmed for tomorrow at 4 pm" with no booking made** (M08 #2: both holds refused, no write attempted) | **Let through.** The "nothing has changed yet" line covers a *failed* write; nothing checks a completion claim when no write was tried. Applies to every model |
+| "ไม่มีเวลาที่บ่ายสามโมงในวันที่ 21" after searching only "21 พฤศจิกายน" (the morning came back); 15:00 was free. The caller took 11:00 (M07 #2) | Let through: the grounding check sees offered times, not a claim that a time is *not* free |
+| `date_phrase` cut from the caller's words: "พรุ่งนี้ตอนบ่ายสาม" → "ตอนบ่ายสามโมง" (booked today), "21 พ.ย. บ่ายสาม" → "21 พฤศจิกายน" | Let through: the runtime trusts the model's phrase. The read-back said "วันพฤหัสบดีที่ 12" and the simulated caller agreed; a person might not notice either |
+| Names never given: "คุณสวัส" (from "สวัสดีค่ะ"), "คู่นี้", "คุ" | Let through: only placeholder words ("ลูกค้า", "Guest") are refused |
+| Every optional field sent as `""` (`for_booking_ref: ""`): 14 of the 27 invalid calls | Refused and handed back; it retried without the field. Costs a call each time |
+| `request_owner_answer`'s `reply_target` guessed nine ways, an invented `owner-123`, and the parking question filed as "ร้านมีกี่ชั่วโมงทำการ" (M03 #1) | Refused; the caller heard that nothing was sent (safe, no use) |
+
 ### Still open
 
 - **Vaguer promises** such as "เดี๋ยวฉันประสานงานให้" (I'll coordinate it) after a refused transfer are not caught: too
   loose to read reliably.
 - **A words-only reply thrown away for a claim** leaves the caller with "ระบบขัดข้องเล็กน้อย" — safe, but blunt.
-
 - **Latency.** 4–20 s a call on this Mac is a test speed, not a phone speed (the blueprint's filler is at 1.8 s,
   recovery at 4 s). Gemma 4 12B on this Mac is not a live-call model as it stands.
-- **Text consent is the model's word.** In one reschedule Gemma set `send_confirmation_text: true` without asking (the
-  persona did not want a text). The gateway records consent on that flag; the runtime cannot tell whether the caller
-  agreed. Worth a deterministic check (the caller's yes after a texting question) before any real call.
 - **The grounding guard makes a weak model look evasive**: asked for "around 4pm", Gemma answered with a time it had
   not searched and was replaced twice by "I don't have a confirmed answer". Safe, but a search on the caller's words
   would have been better. The grader passed it (it books the first offer).
