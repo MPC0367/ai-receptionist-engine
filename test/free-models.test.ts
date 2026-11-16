@@ -814,7 +814,7 @@ test('a move made as a new booking is refused: look the booking up, then move it
   const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
   const confirm = await rec.respond('ชื่อบีค่ะ ขอเลื่อนนัดจากวันที่ 20 เป็นวันที่ 21 พ.ย. 69 บ่ายสามค่ะ');
   assert.match(rec.toolLog[1].problems![0], /call get_bookings_for_caller first/);
-  assert.match(rec.toolLog[3].problems![0], /has 1 booking and asked to move one.*for_booking_ref/);
+  assert.match(rec.toolLog[3].problems![0], /has 1 booking and is talking about it.*for_booking_ref/);
   assert.match(confirm, /^ขอทวนนะคะ: เลื่อนนัด/, 'the hold that went through is a move');
   assert.match(await rec.respond('ใช่ค่ะ'), /^เลื่อนนัดเรียบร้อยแล้วค่ะ/);
   const rows = await withTenant(A, async tx => (await tx.query(`select starts_at, status from appointments where status <> 'cancelled'`)).rows);
@@ -856,4 +856,52 @@ test('a "move" with no booking to move, or a second appointment asked for, may b
       : step === 2 ? tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'บี' }) : text('ค่ะ'); };
   assert.match(await rec2.respond('ไม่เลื่อนแล้วค่ะ ขอจองเพิ่มอีกนัด พรุ่งนี้บ่ายสามค่ะ'), /^ขอทวนนะคะ: นวดไทย 60 นาที/, 'a second appointment, asked for');
   assert.ok(!rec2.events.includes('move_as_new_booking'));
+});
+
+test('answersReadBack: yeses as callers say them; a change or correction is not one, and a no to a text is not a no to the booking', async () => {
+  const { answersReadBack, mentionsOwnBooking, speaksAsRuntime } = await import('../sim/model/receptionist.ts');
+  for (const line of ['ยืนยันจองเลยค่ะ', 'ถูกต้องค่ะ ยืนยันตามนั้นเลยค่ะ', 'ยืนยันครับ ขอบคุณครับ', 'ใช่ค่ะ ยืนยันตามนั้นเลยค่ะ ไม่ต้องส่งข้อความยืนยันมาทางโทรศัพท์นะคะ',
+    'ยืนยันจองเลยค่ะ ไม่ทราบว่าขอรับข้อความยืนยันทางมือถือด้วยได้ไหมคะ?', 'Yes, that works perfectly for me.', "Yes please, but no text."]) assert.equal(answersReadBack(line), 'yes', line);
+  for (const line of ['ขอเปลี่ยนวันเป็นวันที่ 21 พฤศจิกายน เวลาบ่ายสามโมงแทนได้ไหมคะ?', 'ขออภัยค่ะ ชื่อคนจองคือ "มด" นะคะ ไม่ใช่คุณสวัสดี รบกวนแก้ไขเป็นชื่อมดด้วยค่ะ',
+    'ไม่ค่ะ', 'Actually, can we do 5 pm instead?']) assert.equal(answersReadBack(line), 'change', line);
+  assert.equal(answersReadBack('ราคาเท่าไหร่คะ'), null);
+  assert.ok(mentionsOwnBooking('สวัสดีค่ะ ขอสายคุณบีที่จองนวดไทยไว้ตอนบ่ายสามวันที่ 20 พฤศจิกายนค่ะ') && mentionsOwnBooking('I have an appointment on Friday.'));
+  assert.ok(!mentionsOwnBooking('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ') && !mentionsOwnBooking('ยังไม่ได้จองค่ะ'));
+  assert.ok(speaksAsRuntime('(ระบบอ่าน) "ย้ายคิวของคุณบี เวลา 3 น. 21 พ.ย. กับคุณนก ราคา 500 บาท ยืนยันไหมคะ?"') && speaksAsRuntime('ขอทวนนะคะ: นวดไทย 60 นาที'));
+  assert.ok(!speaksAsRuntime('ขอทวนอีกครั้งนะคะ ต้องการวันพรุ่งนี้ใช่ไหมคะ') && !speaksAsRuntime('ระบบของเราเปิดจองได้ทุกวันค่ะ'));
+});
+
+test('a yes that did not answer the read-back books nothing: gpt-oss\'s stale hold, booked on a later "ยืนยันค่ะ"', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let step = 0;
+  brain = msgs => {
+    step++;
+    const last = msgs.at(-1), tr = last.role === 'tool' ? JSON.parse(last.content) : null;
+    if (step === 1) return tool('search_availability', { variant_ref: 'นวดไทย 60', date_phrase: 'พรุ่งนี้บ่ายสาม' });
+    if (step === 2) return tool('hold_slot', { slot_token: tr.data.options[0].slot_token, client_name: 'บี' });
+    if (step === 3) return text('ได้ค่ะ วันที่ 21 ได้เลยค่ะ ยืนยันไหมคะ');
+    if (step === 4) return tool('create_booking', { hold_ref: 'H1', client_name: 'บี' });
+    return text('ขออภัยค่ะ');
+  };
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.match(await rec.respond('ชื่อบีค่ะ ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ'), /^ขอทวนนะคะ: นวดไทย 60 นาที/);
+  await rec.respond('ขอเปลี่ยนวันเป็นวันที่ 21 พฤศจิกายน เวลาบ่ายสามโมงแทนได้ไหมคะ?');
+  assert.equal(await rec.respond('ยืนยันค่ะ'), 'ขออภัยค่ะ รายการนี้ยังไม่สำเร็จ ยังไม่มีการเปลี่ยนแปลงใดๆ นะคะ');
+  assert.match(rec.toolLog.at(-1)!.code ?? '', /VALIDATION_FAILED|need_more_detail/);
+  assert.ok(rec.events.includes('write_without_yes'));
+  assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from appointments`)).rows[0].n), 0, 'nothing booked');
+});
+
+test('a reply that speaks as the system is asked again, then replaced', async () => {
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  brain = () => text('(ระบบอ่าน) "ย้ายคิวของคุณบี เวลา บ่ายสาม พรุ่งนี้ ยืนยันไหมคะ?"');
+  bodies.length = 0;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('ขอเลื่อนเป็นพรุ่งนี้บ่ายสามค่ะ'), 'ขออภัยค่ะ ขอตรวจสอบรายละเอียดอีกครั้งนะคะ ต้องการวันและเวลาไหนคะ');
+  assert.deepEqual(rec.events, ['speaks_as_runtime', 'speaks_as_runtime']);
+  assert.match(bodies[1].body.messages[0].content, /Only the runtime reads a confirmation/);
 });

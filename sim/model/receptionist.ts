@@ -130,10 +130,44 @@ export function asksToMove(t: string): boolean {
   return /เลื่อน|เปลี่ยน(วัน|เวลา)?นัด|ย้าย(วัน|เวลา)?นัด/.test(t) ||
     /\breschedul\w*|\b(move|change|shift)\s+(my|the|our|that|this)\s+(booking|appointment|reservation|massage)\b/i.test(t);
 }
+/**
+ * The caller talking about an appointment they already have ("ที่จองนวดไทยไว้ตอนบ่ายสามวันที่ 20", "มีนัด", "my
+ * appointment"): a new booking may be a move they have not named yet. gpt-oss-20b, told "ขอสายคุณบีที่จองนวดไทยไว้…",
+ * held a second appointment at the same time with another therapist (16 Nov 2026).
+ */
+export function mentionsOwnBooking(t: string): boolean {
+  if (/ไม่(ได้)?มีนัด|ยังไม่(ได้)?จอง|\b(don'?t|do not) have (a|an|any) (booking|appointment|reservation)\b/i.test(t)) return false;
+  return /ที่จอง\S{0,40}?ไว้|จองไว้แล้ว|มีนัด|นัดเดิม|นัดของ(ฉัน|ดิฉัน|ผม|หนู|เรา)/.test(t) ||
+    /\b(my|our) (existing |current )?(booking|appointment|reservation)\b|\bI (already )?have (a|an) (booking|appointment|reservation)\b|\bI'?m booked\b/i.test(t);
+}
+
+/**
+ * The caller's answer to the runtime's read-back: a yes ("ยืนยันจองเลยค่ะ", "ถูกต้องค่ะ", "Yes, that works"), a change
+ * or correction ("ขอเปลี่ยนวันเป็น…แทน", "ไม่ใช่… รบกวนแก้ไข"), or neither (a question). A no to the text in the same breath
+ * ("…ไม่ต้องส่งข้อความนะคะ") is not a no to the booking.
+ */
+export function answersReadBack(t: string): 'yes' | 'change' | null {
+  const s = t.replace(/(ไม่ต้อง|ไม่)\S{0,6}?ส่ง\S{0,10}?ข้อความ\S*|ข้อความ\S{0,10}?ยืนยัน\S*|\bno (text|message)\b[^.?!]*|\b(don'?t|do not) (need|want) (a |the )?(text|message)\b[^.?!]*|\b(don'?t|do not) (text|send)\b[^.?!]*/gi, '');
+  if (/เปลี่ยน|แทน|แก้ไข|ผิด|ไม่ใช่|ไม่ถูก|ยังไม่|ไม่เอา|ไม่จอง|ไม่ยืนยัน|ไม่เลื่อน|รอก่อน|เดี๋ยวก่อน|^\s*ไม่|\b(no|not|wrong|change|instead|actually|wait|hold on|cancel)\b/i.test(s)) return 'change';
+  if (/ยืนยัน|ถูกต้อง|ตกลง|ใช่|โอเค|จองเลย|เลื่อนเลย|ได้เลย|ตามนั้น|ตามนี้|\b(yes|yeah|yep|correct|right|sure|ok(ay)?|please do|go ahead|book it|confirm(ed)?|works)\b/i.test(s)) return 'yes';
+  return yesNo(s) === 'yes' ? 'yes' : null;
+}
+
 /** The caller wanting another appointment as well ("จองเพิ่ม", "อีกนัด", "a second appointment"): a new booking is then theirs. */
 export function asksForAnother(t: string): boolean {
   return /จองเพิ่ม|นัดเพิ่ม|อีก(นัด|คิว)|เพิ่มอีก(นัด|คิว)/.test(t) || /\b(another|second|additional|extra|separate) (booking|appointment)\b|\bas well\b/i.test(t);
 }
+
+/**
+ * A reply that speaks as the runtime: "(ระบบอ่าน) …", "(The runtime said …)", or opening with the runtime's own read-back
+ * words. gpt-oss-20b wrote "(ระบบอ่าน) "ย้ายคิวของคุณบี … 21 พ.ย. …"" for a hold on 20 Nov, and the caller said yes to it.
+ */
+export const speaksAsRuntime = (t: string) => /\((ระบบ|the runtime|runtime|system)[^)]*\)|ระบบอ่าน|^\s*(ขอทวนนะคะ\s*:|To confirm\s*:)/i.test(t);
+
+const SPEAKS_AS_RUNTIME = `
+
+Your last reply spoke as the system or read a confirmation itself. Only the runtime reads a confirmation, after
+hold_slot succeeds: never write "(ระบบ…)", "(The runtime…)", "ขอทวนนะคะ:" or "To confirm:" yourself.`;
 
 const NO_WRITE_MADE = `
 
@@ -463,6 +497,21 @@ export class Receptionist {
   private speakCode(text: string) { this.call.say(text); return text; }
 
   /**
+   * The caller's yes to the confirmation the runtime read: their first turn after it, read as a yes, and nothing after it
+   * that changes or corrects it. The gateway only knew the yes came later: gpt-oss-20b booked a stale hold on "ยืนยันค่ะ"
+   * said two turns after the read-back, the first answer having been "ขอเปลี่ยนวัน…แทน" (16 Nov 2026).
+   */
+  private readBackYes(spokenTurn: number): { ok: true; turn: number } | { ok: false; why: string } {
+    const after = this.call.turns.filter(t => t.who === 'caller' && t.seq > spokenTurn), reply = after[0];
+    const changes = (t: string) => /เปลี่ยน|แทน|แก้ไข|ผิด|ไม่ใช่|ไม่จอง|ไม่ยืนยัน|ไม่เลื่อน|ยกเลิก|\b(instead|change|wrong|cancel|actually)\b/i.test(t);
+    if (reply && answersReadBack(reply.text) === 'yes' && !after.slice(1).some(t => changes(t.text))) return { ok: true, turn: reply.seq };
+    this.events.push('write_without_yes');
+    return { ok: false, why: reply
+      ? `the caller's answer to the confirmation that was read was not a yes ("${reply.text.slice(0, 90)}"): for something else, search and hold it (the runtime reads it); otherwise hold the time again so the runtime reads it, and wait for their yes`
+      : 'the caller has not answered the confirmation yet' };
+  }
+
+  /**
    * A new-booking hold while the caller is asking to move one they have: refused until their bookings are looked up,
    * and while one exists, until it is moved or the caller asks for another appointment as well. A move goes through
    * for_booking_ref, so the old time is released in the same step and the caller never ends up with two.
@@ -470,12 +519,12 @@ export class Receptionist {
   private moveProblems(tool: string, a: any): string[] {
     if (tool !== 'hold_slot' || a.for_booking_ref || this.call.outcomes.includes('rescheduled')) return [];
     const callers = this.call.turns.filter(t => t.who === 'caller');
-    const move = callers.findLast(t => asksToMove(t.text)), another = callers.findLast(t => asksForAnother(t.text));
+    const move = callers.findLast(t => asksToMove(t.text) || mentionsOwnBooking(t.text)), another = callers.findLast(t => asksForAnother(t.text));
     if (!move || (another && another.seq > move.seq) || this.callerBookings === 0) return [];
     this.events.push('move_as_new_booking');
     return [this.callerBookings === null
-      ? `the caller asked to move an appointment they have ("${move.text.slice(0, 90)}"): call get_bookings_for_caller first, then move it with for_booking_ref (search, hold, then reschedule_booking)`
-      : `the caller has ${this.callerBookings} booking${this.callerBookings > 1 ? 's' : ''} and asked to move one ("${move.text.slice(0, 90)}"): search and hold with for_booking_ref set to its label, then reschedule_booking. A hold without it makes a second appointment; if the caller wants one as well, ask them first`];
+      ? `the caller is talking about an appointment they have ("${move.text.slice(0, 90)}"): call get_bookings_for_caller first; to move it, search and hold with for_booking_ref, then reschedule_booking`
+      : `the caller has ${this.callerBookings} booking${this.callerBookings > 1 ? 's' : ''} and is talking about it ("${move.text.slice(0, 90)}"): to move it, search and hold with for_booking_ref set to its label, then reschedule_booking. A hold without it makes a second appointment; if the caller wants one as well, ask them first`];
   }
 
   /** A booking name that is a stand-in, or that the caller never said ("คุณสวัส" from "สวัสดีค่ะ"): ask, or leave it out. */
@@ -561,6 +610,8 @@ export class Receptionist {
 
   /** A reply that says something was or will be done which no tool in this call did (a transfer, a question sent). */
   private unbackedPromise(text: string) {
+    if (speaksAsRuntime(text)) return { event: 'speaks_as_runtime', note: SPEAKS_AS_RUNTIME, line: {
+      th: 'ขออภัยค่ะ ขอตรวจสอบรายละเอียดอีกครั้งนะคะ ต้องการวันและเวลาไหนคะ', en: 'Sorry, let me check that again. Which day and time would you like?' } };
     if (!this.bridged && promisesTransfer(text)) return { event: 'transfer_promise_without_tool', note: NO_TRANSFER_MADE, line: {
       th: 'ขออภัยค่ะ ตอนนี้ดิฉันยังต่อสายให้เจ้าหน้าที่ไม่ได้ค่ะ ดิฉันช่วยเรื่องนี้ต่อได้ หรือฝากเรื่องให้ทีมงานติดต่อกลับได้ค่ะ',
       en: "I'm sorry, I can't put you through to a person right now. I can keep helping with this, or pass a message to the team." } };
@@ -590,9 +641,11 @@ export class Receptionist {
     const lastCaller = [...this.call.turns].reverse().find(t => t.who === 'caller')!.seq;
     if (name === 'create_booking' || name === 'reschedule_booking') {
       if (!this.lastHold) return { result: { ok: false, error: { code: 'VALIDATION_FAILED', speakable_hint: 'need_more_detail' } } };
+      const yes = this.readBackYes(this.lastHold.spokenTurn);
+      if (!yes.ok) return { result: { ok: false, error: { code: 'VALIDATION_FAILED', speakable_hint: 'need_more_detail', problems: [yes.why] } } };
       const text = this.textConsent(input);
       const meta = { spoken_confirmation_sha256: sha(this.lastHold.rendered.th + '\n' + this.lastHold.rendered.en), spoken_turn: this.lastHold.spokenTurn,
-        confirm_turn: lastCaller, expected_version: input.booking_ref ? this.versions.get(input.booking_ref) : undefined, text_consent_turn: text.turn };
+        confirm_turn: yes.turn, expected_version: input.booking_ref ? this.versions.get(input.booking_ref) : undefined, text_consent_turn: text.turn };
       const r = await this.call.tool(name, text.input, meta);
       if (r.ok) { this.lastHold = null; this.call.outcomes.push(name === 'create_booking' ? 'booked' : 'rescheduled'); if (r.data.text_queued) this.textQueued = true; }
       const ref = name === 'create_booking' ? r.data?.booking_ref : input.booking_ref;
@@ -620,9 +673,11 @@ export class Receptionist {
       const version = this.versions.get(input.booking_ref);
       if (input.confirmed) {
         if (!this.lastCancel || this.lastCancel.ref !== input.booking_ref) return { result: { ok: false, error: { code: 'VALIDATION_FAILED', speakable_hint: 'need_more_detail' } } };
+        const yes = this.readBackYes(this.lastCancel.spokenTurn);
+        if (!yes.ok) return { result: { ok: false, error: { code: 'VALIDATION_FAILED', speakable_hint: 'need_more_detail', problems: [yes.why] } } };
         const text = this.textConsent(input);
         const r = await this.call.tool(name, text.input, { expected_version: version, spoken_confirmation_sha256: sha(this.lastCancel.rendered.th + '\n' + this.lastCancel.rendered.en),
-          spoken_turn: this.lastCancel.spokenTurn, confirm_turn: lastCaller, text_consent_turn: text.turn });
+          spoken_turn: this.lastCancel.spokenTurn, confirm_turn: yes.turn, text_consent_turn: text.turn });
         if (r.ok) { this.lastCancel = null; this.call.outcomes.push('cancelled'); if (text.turn !== undefined) this.textQueued = true; }
         return { result: text.note && r.ok ? { ...r, data: { ...r.data, confirmation_text: text.note } } : r };
       }
