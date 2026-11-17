@@ -5,6 +5,10 @@ synthetic data, stand-in providers, no telephony, no language model, no real mes
 person and phone number in `sim/seed.ts` is fictional. Owner decisions in force (blueprint §18, 11 Nov 2026): Thailand
 first with LINE as the owner channel, massage / day spa, LiveKit Agents as the future voice runtime.
 
+Its copy off this Mac is the private GitHub repository `MPC0367/ai-receptionist-engine` (since 17 Nov 2026), pushed
+daily by the studio backup (`Studio/tools/snapshot.sh`, which checks the repository is private first). A backup only:
+nothing here is deployed.
+
 ## Run it
 
 ```bash
