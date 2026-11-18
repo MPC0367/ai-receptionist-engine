@@ -5,6 +5,11 @@ double-booking, texts confirmations, and passes questions it cannot answer to th
 11 Nov 2026; built so far only as **Gate A: simulation**. Fictional businesses, people and numbers; nothing reaches a
 real phone, LINE account or calendar. Public since 18 Nov 2026, to share with colleagues.
 
+**Try it live: https://endless-jesse-var-strategy.trycloudflare.com** — call the receptionist of a fictional Thai day
+spa by voice (Safari or Chrome; allow the microphone) or by typing, in Thai or English. It runs on O2's test computer,
+so the link works only while that computer is on, and it changes when the link is restarted. One call at a time; please
+use made-up names.
+
 | Path | What it is |
 |---|---|
 | `BLUEPRINT-2026-11-11.md` | The blueprint: memo, evidence ledger, state machines, architecture, providers, data model, tools, policies, economics, gates, tests, decisions. Assembled from `parts/` by `assemble.sh`: edit the parts, then reassemble. |
