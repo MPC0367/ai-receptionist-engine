@@ -3,7 +3,7 @@
 O2's original AI phone receptionist for small businesses: it answers calls, books into the business's own diary without
 double-booking, texts confirmations, and passes questions it cannot answer to the owner on LINE. Designed clean-room on
 11 Nov 2026; built so far only as **Gate A: simulation**. Fictional businesses, people and numbers; nothing reaches a
-real phone, LINE account or calendar. Private.
+real phone, LINE account or calendar. Public since 18 Nov 2026, to share with colleagues.
 
 | Path | What it is |
 |---|---|
