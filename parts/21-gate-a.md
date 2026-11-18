@@ -6,7 +6,7 @@
 Opened on the owner's "Use the defaults" (§18). Simulation only: fictional data, stand-in providers, sandbox
 messages; nothing reached a phone, LINE or a calendar.
 
-**Built** in `engine/` (git repository; private GitHub copy `MPC0367/ai-receptionist-engine` since 17 Nov 2026, pushed daily by the studio backup; start at `engine/README.md`): Postgres schema with tenant
+**Built** in `engine/` (private GitHub repository `MPC0367/ai-receptionist-engine` since 17 Nov 2026, whose root is this whole folder since 18 Nov 2026, blueprint included; pushed daily by the studio backup; start at `engine/README.md`): Postgres schema with tenant
 keys, row-level security for the app role and the `no_double_booking` exclusion constraint; the date/time resolver;
 the booking engine; the Tool Gateway with signed per-call tokens; the safety gate, owner-reply validation and the
 pending-question and knowledge-approval machines with timers; LINE/SMS signature checks, replay protection,
