@@ -8,7 +8,7 @@ const str = (description: string, e?: string[]) => ({ type: 'string', descriptio
 
 export const TOOL_SPECS = [
   { name: 'get_business_facts', description: "Look up an approved answer about the business (hours, address, payment, services, policies). Returns status answer | no_answer | conflict.",
-    input_schema: obj({ question: str("the caller's question") }, ['question']) },
+    input_schema: obj({ question: str("the caller's question"), question_other_language: str('the same question in the other language: Thai if the caller asked in English, English if in Thai (answers may be stored in either)') }, ['question']) },
   { name: 'get_client_context', description: "What is known about the caller from their phone number (preferred name, whether they have future bookings).",
     input_schema: obj({}, []) },
   { name: 'search_availability', description: "Find bookable times. Pass the service as named on the menu and the caller's own date/time words.",
@@ -24,10 +24,10 @@ export const TOOL_SPECS = [
     input_schema: obj({ booking_ref: str('booking_ref'), hold_ref: str('hold_ref'), send_confirmation_text: { type: 'boolean', description: 'true only if the caller agreed to a text' } }, ['booking_ref', 'hold_ref']) },
   { name: 'cancel_booking', description: 'Cancel a booking. Call first with confirmed=false (the runtime reads the cancellation sentence with any fee), then with confirmed=true after the caller says yes.',
     input_schema: obj({ booking_ref: str('booking_ref'), confirmed: { type: 'boolean', description: 'false to read the confirmation; true after the yes' }, send_confirmation_text: { type: 'boolean', description: 'true only if the caller agreed to a text' } }, ['booking_ref', 'confirmed']) },
-  { name: 'record_consent', description: "Record the caller's permission to be texted about their pending question.",
+  { name: 'record_consent', description: "Record the caller's permission to be texted about their pending question (request_owner_answer records it itself after the caller's yes).",
     input_schema: obj({ purpose: str('always service_followup', ['service_followup']), target: str('ani = the number they are calling from', ['ani', 'other_number']),
       number: str('only for other_number'), question_text: str('the confirmed one-sentence question') }, ['purpose', 'target', 'question_text']) },
-  { name: 'request_owner_answer', description: 'Send the confirmed question to the team; they will text the answer. Call after record_consent.',
+  { name: 'request_owner_answer', description: 'Send the caller\'s question to the team; they will text the answer. The first call reads the question back and asks permission to text; after the caller says yes, call it again with the same question_text.',
     input_schema: obj({ question_text: str('the same confirmed sentence'), summary_source: str('model if you wrote the sentence', ['model', 'caller_words']),
       reply_target: obj({ kind: str('ani or other_number', ['ani', 'other_number']), number: str('only for other_number') }, ['kind']),
       caller_preferred_name: str("caller's name if given"), variant_ref: str('service the question is about, if any') }, ['question_text', 'summary_source', 'reply_target']) },

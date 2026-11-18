@@ -16,10 +16,16 @@ import { persistCallArtifacts } from '../src/privacy.ts';
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 export const T = {
-  // §10.1: the recording clause is present only when the tenant records (D-09: off by default in Thailand).
-  greeting: (name: string, lang: 'th' | 'en', recording: boolean) => lang === 'th'
-    ? `สวัสดีค่ะ ${name} ค่ะ ดิฉันเป็นผู้ช่วย AI ของร้าน${recording ? ' การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ' : 'ค่ะ'}`
-    : `Hi, you've reached ${name}. I'm the business's AI assistant.${recording ? ' This call may be recorded to help with your booking.' : ''}`,
+  // §10.1: the recording clause is present only when the tenant records (D-09: off by default in Thailand). The AI
+  // clause is the tenant's policy `ai_disclosure` (on unless set false: the owner, 18 Nov 2026, "dont anounce that you're
+  // an ai assistant", for the talk page); asked, the receptionist always says it is an AI (honestAnswer, receptionist.ts).
+  greeting: (name: string, lang: 'th' | 'en', recording: boolean, disclose = true) => lang === 'th'
+    ? disclose
+      ? `สวัสดีค่ะ ${name} ค่ะ ดิฉันเป็นผู้ช่วย AI ของร้าน${recording ? ' การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ' : 'ค่ะ'}`
+      : `สวัสดีค่ะ ${name} ค่ะ ยินดีให้บริการค่ะ${recording ? ' การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ' : ''}`
+    : disclose
+      ? `Hi, you've reached ${name}. I'm the business's AI assistant.${recording ? ' This call may be recorded to help with your booking.' : ''}`
+      : `Hi, you've reached ${name}. How can I help you today?${recording ? ' This call may be recorded to help with your booking.' : ''}`,
   unknown: (lang: 'th' | 'en') => lang === 'th' ? 'ดิฉันยังไม่มีคำตอบที่ยืนยันได้สำหรับเรื่องนี้ และไม่อยากเดาค่ะ' : "I don't have a confirmed answer to that, and I don't want to guess.",
   slotTaken: (lang: 'th' | 'en') => lang === 'th' ? 'ขออภัยค่ะ เวลานั้นเพิ่งมีคนจองไป' : 'That time was just taken.',
   textQuestion: (lang: 'th' | 'en') => lang === 'th' ? 'ต้องการรับข้อความยืนยันการจองทางเบอร์นี้ไหมคะ' : 'Would you like a text confirming the booking at this number?',
@@ -50,17 +56,19 @@ export class Call {
         values ($1,$2,'voice',$3,$4,$5,'in_dialogue',$6,$7,$8,$9)`,
         [call.tenantId, call.conversationId, `sim-${call.conversationId}`, o.ani, o.ani ? idHash(o.ani) : null, cfg?.number ?? 1, o.now(), call.lang, !!o.isTest]);
       const country = (await tx.query('select country from tenants')).rows[0].country;
-      call.recordingOn = !!(await tx.query('select body from policies order by version desc limit 1')).rows[0]?.body?.recording;
+      const policy = (await tx.query('select body from policies order by version desc limit 1')).rows[0]?.body;
+      call.recordingOn = !!policy?.recording;
+      call.aiDisclosure = policy?.ai_disclosure !== false;
       await tx.query('update conversations set recording_on = $2 where id = $1', [call.conversationId, call.recordingOn]);
       call.claims = { tenant_id: call.tenantId, location_id: route.location_id, conversation_id: call.conversationId, config_version: cfg?.number ?? 1,
         ani: o.ani, lang: call.lang, jurisdiction: country };
       call.token = mintCallToken(call.claims, o.now());
       call.tokenAt = o.now().getTime();
-      const loc = (await tx.query('select name, time_zone from locations limit 1')).rows[0];
+      const loc = (await tx.query('select name, name_en, time_zone from locations limit 1')).rows[0];
       call.tz = loc.time_zone;
-      return loc.name as string;
+      return (call.lang === 'en' ? loc.name_en ?? loc.name : loc.name) as string;
     });
-    call.say(T.greeting(name, call.lang, call.recordingOn));
+    call.say(T.greeting(name, call.lang, call.recordingOn, call.aiDisclosure));
     return { call, unrouted: false };
   }
 
@@ -190,6 +198,8 @@ export class Call {
   }
 
   recordingOn = false;
+  /** Whether the greeting says it is an AI (the tenant's policy; asked, it always says so). */
+  aiDisclosure = true;
   startedAt = 0;
 
   /** AT-33: the caller objects — recording stops at this offset; the call continues. */

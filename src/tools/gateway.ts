@@ -27,7 +27,7 @@ export type Meta = {
 
 const S = (properties: Schema['properties'], required: string[] = []): Schema => ({ type: 'object', properties, required });
 const SCHEMAS: Record<string, Schema> = {
-  get_business_facts: S({ question: { type: 'string', maxLength: 300 }, topic_hint: { type: 'string', enum: ['hours', 'location', 'parking', 'services', 'prices', 'policies', 'staff', 'payment_methods', 'other'] } }, ['question']),
+  get_business_facts: S({ question: { type: 'string', maxLength: 300 }, question_other_language: { type: 'string', maxLength: 300 }, topic_hint: { type: 'string', enum: ['hours', 'location', 'parking', 'services', 'prices', 'policies', 'staff', 'payment_methods', 'other'] } }, ['question']),
   get_client_context: S({}),
   search_availability: S({ variant_ref: { type: 'string', maxLength: 80 }, date_phrase: { type: 'string', maxLength: 80 }, staff_ref: { type: 'string', maxLength: 80 },
     max_options: { type: 'integer', minimum: 1, maximum: 3 }, for_booking_ref: { type: 'string', maxLength: 64 } }, ['variant_ref', 'date_phrase']),
@@ -172,7 +172,9 @@ const redact = (a: unknown) => JSON.parse(JSON.stringify(a ?? {}, (k, v) => (['n
 async function dispatch(tx: Tx, c: CallClaims, tool: string, a: Record<string, any>, m: Meta, now: Date): Promise<unknown> {
   switch (tool) {
     case 'get_business_facts':
-      return businessFacts(tx, a.question, now, c.lang);
+      // The question in both languages: answers learned from the owner are stored with the words of the question that
+      // was asked (found 18 Nov 2026: a parking answer saved from a Thai question was not found in English).
+      return businessFacts(tx, [a.question, a.question_other_language].filter(Boolean).join('\n'), now, c.lang);
 
     case 'get_client_context': {
       if (!c.ani) return { identity_status: 'unknown' };

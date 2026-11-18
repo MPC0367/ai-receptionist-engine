@@ -94,6 +94,25 @@
   .round svg { width: 20px; height: 20px; }
   .round.listening { background: var(--bad); color: #fff; animation: pulse 1.3s infinite; }
   @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--bad) 45%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
+  .callbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 18px; background: var(--surface-2); }
+  .callbar[hidden] { display: none; }
+  .orb { width: 44px; height: 44px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.55), transparent 60%), var(--orb, #8e8e93); transition: background .3s; }
+  .orb[data-state="listening"] { --orb: #1a9f45; animation: breathe 1.6s ease-in-out infinite; }
+  .orb[data-state="thinking"] { --orb: #d97706; animation: think 1.1s ease-in-out infinite; }
+  .orb[data-state="speaking"] { --orb: #0071e3; animation: talk .45s ease-in-out infinite alternate; }
+  @keyframes breathe { 0%, 100% { box-shadow: 0 0 0 0 rgba(26,159,69,.45); } 50% { box-shadow: 0 0 0 11px rgba(26,159,69,0); } }
+  @keyframes think { 0%, 100% { opacity: .65; } 50% { opacity: 1; } }
+  @keyframes talk { from { transform: scale(.93); } to { transform: scale(1.06); } }
+  .callbar__text { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .callbar__text strong { font-size: 14px; }
+  .callbar__text span { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .timer { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+  .voice-sel { max-width: 150px; font-size: 12.5px; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 5px 6px; }
+  .round--end { background: #c4281c; color: #fff; }
+  .round--call { background: #1a7f37; color: #fff; }
+  .round[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+  @media (max-width: 640px) { .callbar { grid-template-columns: auto minmax(0, 1fr) auto auto auto; } .voice-sel, .timer { display: none; } }
+  @media (prefers-reduced-motion: reduce) { .orb { animation: none !important; } }
   .composer__foot { display: flex; gap: 14px; align-items: center; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
   .composer__foot label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
 
@@ -199,20 +218,34 @@
   <section class="chat" aria-label="The call">
     <ol class="thread" id="thread" aria-live="polite"></ol>
     <div class="composer">
+      <div class="callbar" id="callbar" hidden>
+        <div class="orb" id="orb" data-state="idle" aria-hidden="true"></div>
+        <div class="callbar__text" aria-live="polite"><strong id="callState">Connecting…</strong><span id="callCaption"></span></div>
+        <span class="timer" id="callTimer">00:00</span>
+        <select id="voiceSel" class="voice-sel" aria-label="The receptionist's voice"></select>
+        <button type="button" class="round" id="talkNow" title="Talk now" aria-label="Talk now (stops the receptionist speaking)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg>
+        </button>
+        <button type="button" class="round" id="muteBtn" aria-pressed="false" title="Mute" aria-label="Mute your microphone">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18M9 9v1a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.9-.7M5 10a7 7 0 0 0 11.5 5.4M19 10a7 7 0 0 1-.6 2.8M12 17v5"/></svg>
+        </button>
+        <button type="button" class="round round--end" id="hangBtn" title="Hang up" aria-label="Hang up">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 9c-3.3 0-6.3 1-8.5 2.7-.6.5-.7 1.4-.2 2l1.4 1.7c.4.5 1.2.6 1.8.3l2.3-1.2c.5-.3.8-.8.7-1.4l-.2-1.6c1.8-.6 3.8-.6 5.6 0l-.2 1.6c-.1.6.2 1.1.7 1.4l2.3 1.2c.6.3 1.4.2 1.8-.3l1.4-1.7c.5-.6.4-1.5-.2-2C18.3 10 15.3 9 12 9z"/></svg>
+        </button>
+      </div>
       <div class="ideas" id="ideas" aria-label="Things to try"></div>
       <form class="say" id="sayForm" autocomplete="off">
         <label class="sr" for="text">What you say to the receptionist</label>
         <input id="text" placeholder="Say something to the receptionist…" disabled>
-        <button type="button" class="round" id="mic" title="Hold a conversation by voice" aria-label="Speak instead of typing" hidden>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg>
+        <button type="button" class="round round--call" id="voiceBtn" title="Switch to a voice call" aria-label="Switch to a voice call: speak and hear the receptionist" hidden>
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1l-2.3 2.2z"/></svg>
         </button>
         <button type="submit" class="round round--send" id="send" aria-label="Send" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
         </button>
       </form>
       <div class="composer__foot">
-        <label><input type="checkbox" id="speak"> Read the replies aloud</label>
-        <label id="handsfreeWrap" hidden><input type="checkbox" id="handsfree"> Keep listening (a phone call feel)</label>
+        <label><input type="checkbox" id="speak"> Read typed replies aloud</label>
         <span id="voiceNote"></span>
       </div>
     </div>
@@ -221,6 +254,10 @@
       <form class="sheet" id="setupForm">
         <h2>Start a call</h2>
         <p>You are the caller. The receptionist answers for a fictional day spa, books into its diary, and texts and messages the owner through a sandbox: nothing leaves this Mac. Bookings use today's real date and time.</p>
+        <fieldset>
+          <legend>How you'll talk</legend>
+          <div class="seg"><label><input type="radio" name="mode" value="voice" checked>Voice call</label><label><input type="radio" name="mode" value="typing">Typing</label></div>
+        </fieldset>
         <fieldset>
           <legend>Language</legend>
           <div class="seg"><label><input type="radio" name="lang" value="th" checked>ไทย</label><label><input type="radio" name="lang" value="en">English</label></div>
@@ -236,12 +273,13 @@
           <div id="modelOpts"></div>
         </fieldset>
         <label class="check"><input type="checkbox" id="fresh" checked> Start with a fresh spa diary (untick to keep bookings from the last call)</label>
+        <label class="check"><input type="checkbox" id="disclose"> The greeting says it is an AI assistant (asked, it always says so)</label>
         <div class="err" id="setupErr" role="alert"></div>
         <div style="display:flex; gap:8px; justify-content:flex-end">
           <button type="button" class="btn" id="cancelSetup" hidden>Cancel</button>
           <button type="submit" class="btn btn--primary" id="startBtn">Call the spa</button>
         </div>
-        <p>The first reply takes longer while the model loads into memory. Each reply then takes a few seconds, more when it searches the diary.</p>
+        <p>On a voice call you speak, it answers out loud, then listens again; it says "one moment" while it works (a reply takes a few seconds, the first one longer while the model loads). Use Safari or Chrome and allow the microphone.</p>
       </form>
     </div>
   </section>
@@ -324,11 +362,18 @@ const EVENT = {
   transfer_promise_without_tool: ['warn', 'The reply promised a person without trying to reach one: asked again'],
   relay_promise_without_tool: ['warn', 'The reply promised to pass a message on without doing it: asked again'],
   text_promise_without_consent: ['warn', 'The reply promised a text without a yes: asked again'],
+  asked_if_ai: ['ok', 'Asked whether it is a person: the runtime said it is the spa\'s AI assistant'],
+  claimed_human: ['bad', 'The reply claimed to be a person: replaced with the truth'],
+  question_read_back: ['ok', 'The runtime read the question back and asked permission to text the answer'],
+  question_corrected: ['warn', 'The caller corrected the question: nothing was sent'],
+  question_declined: ['warn', 'The caller did not want a text: nothing was sent'],
+  question_not_confirmed: ['warn', 'The caller did not say yes to the question: nothing was sent'],
 };
 function args(name, a) {
   if (!a) return '';
   const bits = [];
   if (a.question) bits.push(`“${a.question}”`);
+  if (a.question_other_language) bits.push(`/ “${a.question_other_language}”`);
   if (a.variant_ref) bits.push(a.variant_ref);
   if (a.date_phrase) bits.push(`“${a.date_phrase}”`);
   if (a.staff_ref) bits.push(`with ${a.staff_ref}`);
@@ -353,7 +398,8 @@ function result(step) {
     case 'create_booking': case 'reschedule_booking': return `${step.name === 'create_booking' ? 'Booked' : 'Moved'}${d.text_queued ? ' · text queued' : ''}${d.confirmation_text ? ` · ${d.confirmation_text}` : ''}`;
     case 'get_bookings_for_caller': return `${(d.bookings ?? []).length} booking(s)${(d.bookings ?? []).map(b => ` · ${b[`start_local_${lang}`] ?? b.start_local_th ?? ''}`).join('')}`;
     case 'cancel_booking': return d.needs_confirmation || d.spoken_to_caller ? 'The runtime read the cancellation terms; waiting for a yes' : 'Cancelled';
-    case 'request_owner_answer': return d.speakable_expectation ? `Sent · told the caller: “${d.speakable_expectation}”` : 'Sent';
+    case 'request_owner_answer': return d.spoken_to_caller ? 'Not sent yet: the runtime read the question back and is waiting for a yes' : 'Sent to the owner';
+    case 'record_consent': return d.spoken_to_caller ? 'The runtime read the question back first' : 'Permission recorded';
     case 'request_human_transfer': return `Outcome: ${d.outcome ?? 'unknown'}`;
     default: return 'Done';
   }
@@ -519,42 +565,180 @@ function renderIdeas() {
   $('#ideas').querySelectorAll('.idea').forEach(b => b.addEventListener('click', () => { const i = $('#text'); i.value = b.dataset.text; i.focus(); }));
 }
 
-/* ---------- Voice (the browser's own speech service) ---------- */
+/* ---------- Voice call: the browser's own speech service hears you; the Mac's voices answer ---------- */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null, listening = false;
+const TTS = 'speechSynthesis' in window;
+const voice = { on: false, muted: false, rec: null, listening: false, broken: '', started: 0, tick: null, lt: null, fillers: [] };
+const FILLER = { th: ['สักครู่นะคะ', 'กำลังตรวจสอบให้อยู่นะคะ', 'ขออีกนิดนะคะ'], en: ['One moment, please.', "I'm still checking for you.", 'Almost there.'] };
+const lang = () => view?.call?.lang ?? 'th';
 function setupVoice() {
-  if (!SR) { $('#voiceNote').textContent = 'Voice: open this page in Safari or Chrome to speak.'; return; }
-  $('#mic').hidden = false; $('#handsfreeWrap').hidden = false;
-  $('#voiceNote').textContent = 'Speech goes through your browser\'s own speech service.';
+  $('#voiceNote').textContent = SR ? 'Voice calls: your browser’s speech service hears you; Gemini’s voice answers (what it says goes to Google’s free tier: use made-up names).'
+    : 'This browser cannot hear speech: open http://127.0.0.1:4520 in Safari or Chrome to talk.';
+  if (TTS) { fillVoices(); speechSynthesis.addEventListener?.('voiceschanged', fillVoices); }
+  if (!SR) document.querySelector('input[name=mode][value=typing]').checked = true;
+}
+// macOS's novelty voices are no receptionist.
+const NOVELTY = /^(Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Junior|Ralph|Fred|Kathy)\b/;
+function voicesFor(l) { return TTS ? speechSynthesis.getVoices().filter(v => !NOVELTY.test(v.name) && (v.lang || '').replace('_', '-').toLowerCase().startsWith(l === 'th' ? 'th' : 'en')) : []; }
+const rankVoice = (v, l) => (/premium/i.test(v.name) ? 4 : /enhanced|neural|natural/i.test(v.name) ? 3 : 0) + ((v.lang || '').replace('_', '-') === (l === 'th' ? 'th-TH' : 'en-US') ? 1 : 0) + (v.localService ? 0.5 : 0);
+/** The Mac voice for a language: the one picked in the menu, else the best installed. */
+function macVoice(l) {
+  const list = voicesFor(l), c = choice(l);
+  return list.find(v => c === `m:${v.name}`) ?? [...list].sort((a, b) => rankVoice(b, l) - rankVoice(a, l))[0] ?? null;
+}
+/** The menu's value: g:<Gemini voice> or m:<Mac voice>. Gemini first when the server has a key (the O2 reels' engine). */
+function choice(l) {
+  let saved = null;
+  try { saved = localStorage.getItem(`talk.voice.${l}`); } catch {}
+  const gem = view?.tts?.gemini ? view.tts.voices.map(v => `g:${v.id}`) : [];
+  const mac = voicesFor(l).map(v => `m:${v.name}`);
+  return [...gem, ...mac].includes(saved) ? saved : gem[0] ?? mac[0] ?? '';
+}
+function fillVoices() {
+  const l = lang(), cur = choice(l);
+  const gem = view?.tts?.gemini ? view.tts.voices.map(v => [`g:${v.id}`, `Gemini · ${v.label}`]) : [];
+  const mac = voicesFor(l).map(v => [`m:${v.name}`, `Mac · ${v.name}`]);
+  $('#voiceSel').innerHTML = [...gem, ...mac].map(([v, t]) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(t)}</option>`).join('') || '<option>System voice</option>';
+}
+/* Gemini's voice plays through Web Audio, unlocked by a press (Safari plays nothing it was not allowed to by one).
+   Lines play in order (a filler, then the answer); "Talk now" cuts the queue. */
+let actx = null;
+const audioQ = { chain: Promise.resolve(), current: null, gen: 0, waiting: 0 };
+function unlockAudio() { try { actx ??= new (window.AudioContext || window.webkitAudioContext)(); actx.resume(); } catch {} }
+function stopSpeaking() { audioQ.gen++; try { audioQ.current?.stop(); } catch {} audioQ.current = null; if (TTS) speechSynthesis.cancel(); }
+const speakingNow = () => audioQ.waiting > 0 || (TTS && speechSynthesis.speaking);
+function speakThen(text, l, done) {
+  if (!text) { done?.(); return; }
+  const c = choice(l);
+  if (!c.startsWith('g:')) { macSpeak(text, l, done); return; }
+  const gen = audioQ.gen;
+  const audio = fetch('/api/tts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, lang: l, voice: c.slice(2) }) })
+    .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `voice ${r.status}`); return r.arrayBuffer(); });
+  audioQ.waiting++;
+  audioQ.chain = audioQ.chain.then(async () => {
+    if (gen !== audioQ.gen) return;
+    let buf;
+    try { buf = await audio; } catch (e) {
+      $('#voiceNote').textContent = e.message;
+      if (gen === audioQ.gen) await new Promise(res => macSpeak(text, l, res));
+      return;
+    }
+    if (gen !== audioQ.gen) return;
+    unlockAudio();
+    const pcm = await actx.decodeAudioData(buf);
+    if (gen !== audioQ.gen) return;
+    await new Promise(res => { const src = actx.createBufferSource(); src.buffer = pcm; src.connect(actx.destination); src.onended = res; audioQ.current = src; src.start(); });
+    audioQ.current = null;
+  }).catch(() => {}).finally(() => { audioQ.waiting--; if (gen === audioQ.gen) done?.(); });
+}
+/** The Mac's voice: in pieces (one long utterance can stall), with a guard if a browser never says it ended. */
+function macSpeak(text, l, done) {
+  if (!TTS || !text) { done?.(); return; }
+  const ps = []; let cur = '';
+  for (const w of text.split(/\s+/)) { if (cur && (cur + ' ' + w).length > 140) { ps.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; }
+  if (cur) ps.push(cur);
+  let left = ps.length, finished = false;
+  const finish = () => { if (finished) return; finished = true; clearTimeout(guard); done?.(); };
+  const guard = setTimeout(finish, 4000 + text.length * 120);
+  const v = macVoice(l);
+  for (const p of ps) {
+    const u = new SpeechSynthesisUtterance(p);
+    u.lang = l === 'th' ? 'th-TH' : 'en-US'; if (v) u.voice = v;
+    u.onend = u.onerror = () => { if (--left === 0) finish(); };
+    speechSynthesis.speak(u);
+  }
+}
+const STATE_TEXT = { listening: 'Listening — speak now', thinking: 'Thinking…', speaking: 'Speaking', muted: 'Muted — press the microphone to talk' };
+function callState(st, caption) {
+  $('#orb').dataset.state = st;
+  $('#callState').textContent = st === 'broken' ? brokenText() : STATE_TEXT[st] ?? st;
+  if (caption !== undefined) $('#callCaption').textContent = caption ?? '';
+}
+function brokenText() {
+  if (voice.broken === 'not-allowed') return 'Press the microphone to talk (and allow it if asked)';
+  if (voice.broken === 'no-recognition') return 'This browser cannot hear speech: type below, or open the page in Safari or Chrome';
+  return `Speech recognition is not working here (${voice.broken}): open the page in Safari or Chrome, or type below`;
+}
+function ring() {
+  try {
+    unlockAudio();
+    const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime;
+    o.frequency.value = 425; o.connect(g).connect(actx.destination);
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.05, t + 0.04); g.gain.setValueAtTime(0.05, t + 0.95); g.gain.linearRampToValueAtTime(0, t + 1);
+    o.start(t); o.stop(t + 1.05);
+  } catch {}
+}
+function tickTimer() { const s = Math.floor((Date.now() - voice.started) / 1000); $('#callTimer').textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }
+function startVoice(greet) {
+  if (!view?.call || view.call.ended) return;
+  Object.assign(voice, { on: true, muted: false, broken: SR ? '' : 'no-recognition', started: Date.now() });
+  clearInterval(voice.tick); voice.tick = setInterval(tickTimer, 1000); tickTimer();
+  $('#callbar').hidden = false; $('#ideas').hidden = true; $('#muteBtn').setAttribute('aria-pressed', 'false'); fillVoices(); renderAll();
+  if (greet) { callState('speaking', view.call.greeting); speakThen(view.call.greeting, lang(), listenSoon); } else listenSoon();
+}
+function stopVoice() {
+  voice.on = false; clearInterval(voice.tick); clearTimeout(voice.lt); stopFillers();
+  try { voice.rec?.abort(); } catch {}
+  voice.listening = false; stopSpeaking();
+  $('#callbar').hidden = true; $('#ideas').hidden = false; renderAll();
+}
+/** Listen once the receptionist has stopped talking (half duplex: it never hears itself). */
+function listenSoon() {
+  clearTimeout(voice.lt);
+  voice.lt = setTimeout(() => { if (speakingNow()) return listenSoon(); listen(); }, 300);
 }
 function listen() {
-  if (!SR || listening || pending || !view?.call || view.call.ended) return;
-  rec = new SR();
-  rec.lang = view.call.lang === 'th' ? 'th-TH' : 'en-US';
-  rec.interimResults = true; rec.continuous = false;
+  if (!voice.on || pending || !view?.call || view.call.ended) return;
+  if (voice.muted) { callState('muted'); return; }
+  if (voice.broken) { callState('broken'); return; }
+  if (voice.listening) return;
+  const r = voice.rec = new SR();
+  r.lang = lang() === 'th' ? 'th-TH' : 'en-US'; r.interimResults = true; r.continuous = false;
   let final = '';
-  rec.onresult = e => { let interim = ''; for (const r of e.results) (r.isFinal ? (final = r[0].transcript) : (interim += r[0].transcript)); $('#text').value = final || interim; };
-  rec.onend = () => { listening = false; $('#mic').classList.remove('listening'); if (final.trim()) say(final.trim()); };
-  rec.onerror = e => { $('#voiceNote').textContent = e.error === 'not-allowed' ? 'The microphone was not allowed.' : `Voice: ${e.error}`; };
-  listening = true; $('#mic').classList.add('listening'); speechSynthesis?.cancel();
-  rec.start();
+  r.onresult = e => {
+    let interim = ''; final = '';
+    for (const x of e.results) { if (x.isFinal) final += x[0].transcript; else interim += x[0].transcript; }
+    const t = (final || interim).trim(); $('#text').value = t; if (t) callState('listening', t);
+  };
+  r.onerror = e => { if (['not-allowed', 'service-not-allowed', 'network', 'audio-capture', 'language-not-supported'].includes(e.error)) voice.broken = e.error; };
+  r.onend = () => {
+    voice.listening = false;
+    const t = final.trim();
+    if (t) say(t);
+    else if (voice.broken) callState('broken');
+    else if (voice.on && !voice.muted) listenSoon();
+  };
+  voice.listening = true; callState('listening', '');
+  try { r.start(); } catch { voice.listening = false; }
 }
-function speak(text, lang) {
-  if (!$('#speak').checked || !('speechSynthesis' in window)) { afterSpeaking(); return; }
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = lang === 'th' ? 'th-TH' : 'en-US';
-  const v = speechSynthesis.getVoices().find(v => v.lang?.replace('_', '-').startsWith(lang === 'th' ? 'th' : 'en-'));
-  if (v) u.voice = v;
-  u.onend = afterSpeaking; u.onerror = afterSpeaking;
-  speechSynthesis.cancel(); speechSynthesis.speak(u);
+function startFillers() {
+  stopFillers();
+  const l = lang();
+  voice.fillers = [1800, 9000, 17000].map((ms, i) => setTimeout(() => { if (pending && voice.on) { speakThen(FILLER[l][i], l); $('#callCaption').textContent = FILLER[l][i]; } }, ms));
 }
-function afterSpeaking() { if ($('#handsfree').checked && !$('#mic').hidden) setTimeout(listen, 250); }
+function stopFillers() { voice.fillers.forEach(clearTimeout); voice.fillers = []; }
+$('#voiceSel').addEventListener('change', e => { try { localStorage.setItem(`talk.voice.${lang()}`, e.target.value); } catch {} });
+$('#speak').addEventListener('change', () => { if ($('#speak').checked) unlockAudio(); });
+$('#talkNow').addEventListener('click', () => {
+  unlockAudio(); stopSpeaking();
+  voice.muted = false; $('#muteBtn').setAttribute('aria-pressed', 'false');
+  if (voice.broken === 'not-allowed') voice.broken = '';
+  try { voice.rec?.abort(); } catch {}
+  voice.listening = false; listen();
+});
+$('#muteBtn').addEventListener('click', () => {
+  voice.muted = !voice.muted; $('#muteBtn').setAttribute('aria-pressed', String(voice.muted));
+  if (voice.muted) { try { voice.rec?.abort(); } catch {} voice.listening = false; callState('muted'); } else listenSoon();
+});
+$('#hangBtn').addEventListener('click', async () => { stopVoice(); view = await api('/api/end', {}); renderAll(); refreshState(); });
+$('#voiceBtn').addEventListener('click', () => { unlockAudio(); startVoice(false); });
 
 /* ---------- Actions ---------- */
 async function say(text) {
   if (pending || !text.trim() || !view?.call || view.call.ended) return;
   pending = { text: text.trim(), note: 'Thinking…' };
   $('#text').value = ''; lock(true); renderThread();
+  if (voice.on) { try { voice.rec?.abort(); } catch {} voice.listening = false; callState('thinking', pending.text); startFillers(); }
   const poll = setInterval(async () => {
     try {
       const v = await api('/api/session'), b = v.call?.busy;
@@ -567,21 +751,23 @@ async function say(text) {
   }, 900);
   try {
     const turn = await api('/api/say', { text: pending.text });
+    stopFillers();
     view = await api('/api/session');
     pending = null; renderThread(); renderSteps();
-    speak(turn.reply, view.call.lang);
+    if (voice.on) { callState('speaking', turn.reply); speakThen(turn.reply, view.call.lang, listenSoon); }
+    else if ($('#speak').checked) speakThen(turn.reply, view.call.lang);
   } catch (e) {
+    stopFillers();
     pending = null; view = await api('/api/session').catch(() => view); renderThread();
-    alert(e.message);
+    if (voice.on) { callState('listening', e.message); listenSoon(); } else alert(e.message);
   } finally {
     clearInterval(poll); lock(false); refreshState();
-    if (!$('#speak').checked || !('speechSynthesis' in window)) {} // listening resumes from afterSpeaking()
-    $('#text').focus();
+    if (!voice.on) $('#text').focus();
   }
 }
 function lock(on) {
   const live = !!view?.call && !view.call.ended;
-  $('#text').disabled = on || !live; $('#send').disabled = on || !live; $('#mic').disabled = on || !live;
+  $('#text').disabled = on || !live; $('#send').disabled = on || !live;
 }
 let stateSig = '';
 async function refreshState() {
@@ -603,6 +789,8 @@ function renderAll() {
   const c = view?.call, live = c && !c.ended;
   $('#status').innerHTML = `<span class="dot${live ? ' live' : ''}"></span><span>${live ? `On a call · ${c.lang === 'th' ? 'ไทย' : 'English'}` : c ? 'Call ended' : 'No call'}</span>`;
   $('#endBtn').hidden = !live;
+  $('#voiceBtn').hidden = !live || voice.on;
+  if (!live && voice.on) stopVoice();
   lock(!!pending);
 }
 
@@ -617,21 +805,24 @@ function openSetup() {
 }
 $('#setupForm').addEventListener('submit', async e => {
   e.preventDefault();
-  const f = new FormData(e.target);
+  const f = new FormData(e.target), wantVoice = f.get('mode') === 'voice';
+  if (voice.on) stopVoice();
+  // Speech has to start from a press in some browsers: say nothing now, while this is one, then ring.
+  if (wantVoice) { unlockAudio(); if (TTS) { try { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(' ')); } catch {} } }
+  if (wantVoice) ring();
   $('#startBtn').disabled = true; $('#startBtn').textContent = 'Ringing…'; $('#setupErr').textContent = '';
   try {
-    view = await api('/api/start', { lang: f.get('lang'), caller: f.get('caller'), model: f.get('model'), fresh: $('#fresh').checked });
+    view = await api('/api/start', { lang: f.get('lang'), caller: f.get('caller'), model: f.get('model'), fresh: $('#fresh').checked, disclose: $('#disclose').checked });
     $('#setup').hidden = true; lastSeen = { texts: 0, owner: 0, diary: '' }; renderAll(); await refreshState();
-    speak(view.call.greeting, view.call.lang);
-    $('#text').focus();
+    if (wantVoice) startVoice(true);
+    else { if ($('#speak').checked) speakThen(view.call.greeting, view.call.lang); $('#text').focus(); }
   } catch (err) { $('#setupErr').textContent = err.message; }
   finally { $('#startBtn').disabled = false; $('#startBtn').textContent = 'Call the spa'; }
 });
 $('#cancelSetup').addEventListener('click', () => { $('#setup').hidden = true; });
 $('#newBtn').addEventListener('click', openSetup);
-$('#endBtn').addEventListener('click', async () => { view = await api('/api/end', {}); renderAll(); refreshState(); });
+$('#endBtn').addEventListener('click', async () => { if (voice.on) stopVoice(); view = await api('/api/end', {}); renderAll(); refreshState(); });
 $('#sayForm').addEventListener('submit', e => { e.preventDefault(); say($('#text').value); });
-$('#mic').addEventListener('click', () => listening ? rec?.stop() : listen());
 $('#thread').addEventListener('click', e => {
   const b = e.target.closest('[data-turn]'); if (!b) return;
   selectTab('steps'); const card = $(`#turn-${b.dataset.turn}`); card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); card?.classList.add('flash'); setTimeout(() => card?.classList.remove('flash'), 1500);

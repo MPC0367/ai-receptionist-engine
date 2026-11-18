@@ -10,8 +10,10 @@
  *   npm run db:start && npm run talk        → http://127.0.0.1:4520
  */
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import pg from 'pg';
 import { withSystem, withTenant } from '../../src/db.ts';
 import { drain } from '../../src/handlers.ts';
 import { lineWebhook, LINE_CHANNEL_SECRET } from '../../src/inbound.ts';
@@ -34,6 +36,72 @@ const MODELS = [
 /** Fictional caller numbers (INV-12). */
 const CALLERS = { new: '+66812349001', returning: '+66812349002' } as const;
 const client = new CompatClient({ provider: 'ollama' });
+
+/**
+ * The receptionist's voice: Gemini's speech models, as in O2's video voice-overs (the owner, 18 Nov 2026: "make it sound
+ * more human like the voice over for our o2 videos"). The free tier allows about 10 takes a day per model and 3 a
+ * minute, so the models take turns, every line is kept in .data/tts (a repeated sentence costs nothing), and when all
+ * are used up the page falls back to the Mac's voice. What the receptionist says goes to Google's free tier, which may
+ * use it to improve its products: fictional data only.
+ */
+const TTS_MODELS = ['gemini-3.8-flash-lite-tts', 'gemini-3.8-flash-tts', 'gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-tts'];
+const VOICES = [
+  { id: 'Sulafat', label: 'Sulafat · warm' }, { id: 'Achernar', label: 'Achernar · soft' }, { id: 'Vindemiatrix', label: 'Vindemiatrix · gentle' },
+  { id: 'Kore', label: 'Kore · firm' }, { id: 'Charon', label: 'Charon · the O2 reels (male)' },
+];
+const NOTES = {
+  th: "A warm, calm receptionist at a Thai day spa answering the phone in Thai. Natural, friendly and unhurried, like a real person talking, not an announcer. Say exactly the transcript.",
+  en: "A warm, calm receptionist at a day spa in Bangkok answering the phone in English. Natural, friendly and unhurried, like a real person talking, not an announcer. Say exactly the transcript.",
+};
+const TTS_DIR = path.join(import.meta.dirname, '..', '..', '.data', 'tts');
+/** Until when each model is resting: a minute for the per-minute limit, until the next Pacific midnight for the daily one. */
+const resting = new Map<string, number>();
+const pacificMidnight = () => {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' })
+    .formatToParts(new Date()).map(x => [x.type, x.value]));
+  return Date.now() + ((24 - Number(p.hour)) * 60 - Number(p.minute)) * 60_000;
+};
+function wav(pcm: Buffer, rate = 24000) {
+  const h = Buffer.alloc(44);
+  h.write('RIFF', 0); h.writeUInt32LE(36 + pcm.length, 4); h.write('WAVEfmt ', 8); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22);
+  h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
+}
+async function speech(text: string, lang: 'th' | 'en', voice: string): Promise<Buffer> {
+  const key = process.env.GEMINI_API_KEY;
+  const v = VOICES.some(x => x.id === voice) ? voice : VOICES[0].id;
+  const file = path.join(TTS_DIR, createHash('sha256').update(`${v}|${lang}|${text}`).digest('hex').slice(0, 32) + '.wav');
+  if (existsSync(file)) return readFileSync(file);
+  if (!key) throw new HttpError(503, 'No Gemini key for the voice: the Mac voice is answering.');
+  for (const model of TTS_MODELS) {
+    if ((resting.get(model) ?? 0) > Date.now()) continue;
+    let r: Response;
+    try {
+      r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST', signal: AbortSignal.timeout(25_000), headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({ contents: [{ parts: [{ text: `### DIRECTOR'S NOTES\n${NOTES[lang]}\n\n### TRANSCRIPT\n${text}` }] }],
+          generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: v } } } } }),
+      });
+    } catch { resting.set(model, Date.now() + 30_000); continue; }
+    const j: any = await r.json().catch(() => ({}));
+    if (r.status === 429) { resting.set(model, JSON.stringify(j).includes('PerDay') ? pacificMidnight() : Date.now() + 60_000); continue; }
+    const part = j?.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)?.inlineData;
+    if (!r.ok || !part) { resting.set(model, Date.now() + 30_000); continue; }
+    const pcm = Buffer.from(part.data, 'base64'), rate = Number(/rate=(\d+)/.exec(part.mimeType ?? '')?.[1] ?? 24000);
+    const out = pcm.subarray(0, 4).toString() === 'RIFF' ? pcm : wav(pcm, rate);
+    mkdirSync(TTS_DIR, { recursive: true }); writeFileSync(file, out);
+    return out;
+  }
+  throw new HttpError(429, 'The Gemini voice is used up for now: the Mac voice is answering.');
+}
+
+/** The talk page's choice whether the greeting says it is an AI (the tenant policy ai_disclosure; asked, it always says so). */
+async function setDisclosure(on: boolean) {
+  const c = new pg.Client({ host: '127.0.0.1', port: 54421, user: 'rcpt', database: DB });
+  await c.connect();
+  try { await c.query(`update policies set body = body || jsonb_build_object('ai_disclosure', $2::boolean) where tenant_id = $1`, [A, on]); }
+  finally { await c.end(); }
+}
 
 type Before = { since: number; tools: number; calls: number; events: number; held: number };
 type Turn = { you: string; reply: string; source: 'model' | 'runtime' | 'error'; ms: number; calls: number;
@@ -61,7 +129,7 @@ async function prebook() {
   if (r.stage !== 'create' || !r.result.ok) throw new Error(`could not make the returning caller's booking (${r.stage})`);
 }
 
-async function start(o: { lang?: string; model?: string; caller?: string; fresh?: boolean }) {
+async function start(o: { lang?: string; model?: string; caller?: string; fresh?: boolean; disclose?: boolean }) {
   const lang = o.lang === 'en' ? 'en' : 'th';
   const model = MODELS.some(m => m.id === o.model) ? o.model! : MODELS[0].id;
   const caller = ['new', 'returning', 'withheld'].includes(o.caller ?? '') ? o.caller! : 'new';
@@ -71,6 +139,7 @@ async function start(o: { lang?: string; model?: string; caller?: string; fresh?
   void warm(model);
   if (o.fresh !== false) { await seed(DB); ownerSent.length = 0; }
   if (caller === 'returning' && o.fresh !== false) await prebook();
+  await setDisclosure(o.disclose === true);
   const ani = caller === 'withheld' ? null : CALLERS[caller as 'new' | 'returning'];
   const { call, unrouted } = await Call.start({ dialed: NUM.A.dialed, ani, lang, now: () => new Date() });
   if (unrouted) throw new HttpError(500, 'The sample spa is missing from the talk database: start a fresh call.');
@@ -128,7 +197,7 @@ async function owner(o: { text?: string; postback?: string; label?: string }) {
 function sessionView() {
   const s = session;
   return {
-    models: MODELS, callers: CALLERS,
+    models: MODELS, callers: CALLERS, tts: { gemini: !!process.env.GEMINI_API_KEY, voices: VOICES },
     call: s && { n: s.n, lang: s.lang, model: s.model, caller: s.caller, ani: s.ani, ended: s.ended, startedAt: s.startedAt,
       conversationId: s.call.conversationId, greeting: s.call.turns[0]?.text ?? '', log: s.log,
       busy: s.busy && { seconds: (Date.now() - s.busy.since) / 1000, steps: s.rec.toolLog.slice(s.busy.tools), calls: s.rec.usage.calls - s.busy.calls } },
@@ -184,7 +253,7 @@ async function readJson(req: http.IncomingMessage): Promise<any> {
 const server = http.createServer(async (req, res) => {
   const send = (status: number, body: unknown, type = 'application/json; charset=utf-8') => {
     res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-    res.end(typeof body === 'string' ? body : JSON.stringify(body));
+    res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   };
   // This Mac only: refuse other host names (a page elsewhere cannot rebind its name to this server).
   const host = (req.headers.host ?? '').toLowerCase();
@@ -201,6 +270,7 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/say') return send(200, await say(String(body.text ?? '')));
       if (url.pathname === '/api/end') return send(200, await end());
       if (url.pathname === '/api/owner') return send(200, await owner(body));
+      if (url.pathname === '/api/tts') return send(200, await speech(String(body.text ?? '').trim().slice(0, 600), body.lang === 'en' ? 'en' : 'th', String(body.voice ?? '')), 'audio/wav');
     }
     send(404, { error: 'Not here.' });
   } catch (e) {

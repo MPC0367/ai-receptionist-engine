@@ -36,7 +36,7 @@ export async function seed(database = process.env.RCPT_DB ?? 'rcpt', reset = tru
     const en = async (t: string, table: string, id: string, name: string) => q(`update ${table} set name_en = $3 where tenant_id = $1 and id = $2`, [t, id, name]);
     // ---- Tenant A: Thai day spa -------------------------------------------------------------------
     await q(`insert into tenants (id, name, country, vertical, status) values ($1,'ร้านสปาตัวอย่าง (Sample Day Spa — fictional)','TH','massage_day_spa','live')`, [A]);
-    await q(`insert into locations (tenant_id, id, name, time_zone, public_phone, public_contact) values ($1,$2,'ร้านสปาตัวอย่าง','Asia/Bangkok',$3,$4)`,
+    await q(`insert into locations (tenant_id, id, name, name_en, time_zone, public_phone, public_contact) values ($1,$2,'ร้านสปาตัวอย่าง','Sample Day Spa','Asia/Bangkok',$3,$4)`,
       [A, IDS.A.loc, NUM.A.publicPhone, JSON.stringify({ address: { th: 'ถนนตัวอย่าง (ที่อยู่สมมติ)', en: 'Sample Road (fictional address)' }, domains: ['samplespa.example'] })]);
     await q(`insert into services (tenant_id, id, name) values ($1,$2,'นวดไทย'), ($1,$3,'นวดเท้า')`, [A, u(A, 30), u(A, 31)]);
     await q(`insert into service_variants (tenant_id, id, service_id, name, aliases, duration_min, buffer_after_min, price_minor, currency, price_is_authoritative) values

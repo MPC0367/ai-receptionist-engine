@@ -209,11 +209,30 @@ conversations, Gemma 4 12B, Thai, on mains power (90 W):
 - **The owner loop works end to end:** an unknown question (parking) went to the owner's LINE; the owner's reply came
   back as a preview to approve; Send texted it to the caller; "save for future callers" made it an approved answer, and
   a new Thai caller was then answered from it by `get_business_facts`.
-- **Open — the model skipped the restatement:** on "ได้ค่ะ ส่งให้หน่อย" Gemma called `record_consent` and
+- **Fixed (18 Nov, "Yes, fix both") — the model skipped the restatement:** on "ได้ค่ะ ส่งให้หน่อย" Gemma called `record_consent` and
   `request_owner_answer` at once, without restating the question and asking whether it is right (the prompt asks for
   it; the runtime does not enforce it). It also said once that the question had been sent before any tool ran
   (`relay_promise_without_tool`: asked again, then it ran the tools).
-- **Open — a learned answer is found only in its own language:** asked in English "do you have parking at the spa?",
+- **Fixed (18 Nov, "Yes, fix both") — a learned answer was found only in its own language:** asked in English "do you have parking at the spa?",
   `get_business_facts` returned no_answer; the answer the owner saved is found by its Thai words only (retrieval is by
   keyword, see README limits). A saved answer needs keywords in both languages, or retrieval beyond keywords.
-- **Open — the English greeting reads the Thai name** "ร้านสปาตัวอย่าง": the seed's location has no English name.
+- **Fixed — the English greeting read the Thai name** "ร้านสปาตัวอย่าง": locations now have `name_en` (migration 009).
+
+### The two fixes, a voice call, and the greeting (18 Nov 2026)
+
+- **The runtime reads a question back before it goes to the owner.** `request_owner_answer` (or `record_consent`) first
+  makes the runtime say "ขอทวนคำถามนะคะ: “…” ถูกต้องไหมคะ ถ้าถูกต้อง ให้ทีมงานส่งคำตอบเป็นข้อความไปที่เบอร์ที่ลงท้ายด้วย 01
+  ได้ไหมคะ"; only the caller's yes as their next turn sends it, and that yes is the recorded permission to text. A
+  correction or a no to the text sends nothing. Gemma 4 12B on the talk page: read back, then sent on "ถูกต้องค่ะ".
+- **Facts are looked up in both languages.** `get_business_facts` takes `question_other_language`; Gemma filled it
+  unprompted beyond the instruction, and the parking answer the owner saved in Thai was found for "is there parking at
+  your spa?" and answered in English.
+- **A voice call** on the talk page (Safari or Chrome): the browser's speech service hears the caller; the reply is
+  spoken in Gemini's voice (as O2's video voice-overs; `gemini-3.8-flash-lite-tts` and three others in turn, ~3 s a
+  line, every line kept in `.data/tts`), with "สักครู่นะคะ" at 1.8 s while the model works; it listens again only when
+  the voice has finished. When the free voice quota is used up, the Mac's voice answers.
+- **The greeting no longer has to say it is an AI** (the owner: "dont anounce that you're an ai assistant"): the
+  tenant policy `ai_disclosure` (on unless set false; the talk page sets it off by default). Asked "am I talking to a
+  person?", the runtime always answers "ดิฉันเป็นผู้ช่วย AI ของร้านค่ะ…" itself, and a reply that claims to be a person
+  or staff is replaced by that sentence (`asksIfAI`, `claimsHuman`). The blueprint's ledger still says to disclose
+  anyway in Thailand (L-T14, draft Thai AI Act) and at the start of US calls (L-U3, L-U5): counsel decides before Gate B.

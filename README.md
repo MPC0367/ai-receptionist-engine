@@ -13,7 +13,7 @@ nothing here is deployed.
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 124 tests (resets the rcpt_test database per test)
+npm test              # 127 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -106,6 +106,16 @@ npm run model:run -- --provider gemini --models gemini-3.8-flash --yes    # GEMI
 npm run db:start
 npm run talk          # http://127.0.0.1:4520 (preview entry `ai-receptionist-talk`)
 ```
+
+**A voice call** (choose "Voice call" when you start, in Safari or Chrome; the app's own Browser pane cannot use the
+microphone): you speak, the browser's speech service turns it into words, the receptionist answers out loud in
+Gemini's voice (the engine behind O2's video voice-overs: `GEMINI_API_KEY` from your shell, which is why the preview
+starts in a login shell; the free tier allows about 10 lines a day per model, so four models take turns, and every line
+is kept in `.data/tts`), says "สักครู่นะคะ" while it works, and listens again when it has finished. The bar shows
+Listening / Thinking / Speaking, with Talk now (interrupt), Mute and Hang up; the menu picks the voice (Gemini's
+Sulafat by default, Charon as in the reels, or a Mac voice, which also takes over when the Gemini quota is used up).
+What the receptionist says goes to Google's free tier: use made-up names. The greeting does not say it is an AI unless
+you tick it (policy `ai_disclosure`); asked, it always says so.
 
 You are the caller; the receptionist is the free model you pick on this Mac (Gemma 4 12B by default, gpt-oss 20B as
 the other) behind the same runtime the scenarios use, so every guard applies. Choose Thai or English and who is calling:

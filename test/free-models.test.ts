@@ -137,6 +137,41 @@ test('the talk page can show what the model saw and who wrote each reply (sim/ta
   assert.equal((hold.seen as any).data.hold_ref, 'H1');
 });
 
+test('the greeting says it is an AI only when the business chooses to; asked, the runtime always says so (18 Nov 2026)', async () => {
+  const pg = (await import('pg')).default;
+  const { asksIfAI, claimsHuman } = await import('../sim/model/receptionist.ts');
+  for (const t of ['คุยกับคนจริงอยู่หรือเปล่าคะ', 'เป็นหุ่นยนต์หรือเปล่าคะ', 'นี่ AI หรือคะ', 'ใช่คนจริงไหมคะ', 'Am I talking to a real person?', 'Are you a bot?', 'Is this an AI?'])
+    assert.ok(asksIfAI(t), `asks: ${t}`);
+  for (const t of ['ขอจองนวดไทยพรุ่งนี้ค่ะ', 'ขอคุยกับพนักงานหน่อยค่ะ', 'Can I speak to a person, please?', 'Is there parking?'])
+    assert.ok(!asksIfAI(t), `not asking: ${t}`);
+  for (const t of ['ดิฉันเป็นพนักงานของร้านค่ะ', 'ไม่ใช่ AI ค่ะ คุยกับคนจริงค่ะ', "I'm a real person, don't worry.", "I'm not a bot."])
+    assert.ok(claimsHuman(t), `claims human: ${t}`);
+  for (const t of ['ดิฉันเป็นผู้ช่วย AI ของร้านค่ะ', "I'm the spa's AI assistant.", 'ให้ดิฉันส่งต่อให้พนักงานไหมคะ'])
+    assert.ok(!claimsHuman(t), `fine: ${t}`);
+
+  const clock = await fresh();
+  const su = new pg.Client({ host: '127.0.0.1', port: 54421, user: 'rcpt', database: 'rcpt_test' });
+  await su.connect();
+  await su.query(`update policies set body = body || '{"ai_disclosure": false}'::jsonb where tenant_id = $1`, [A]);
+  await su.end();
+  const th = (await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() })).call;
+  assert.equal(th.turns[0].text, 'สวัสดีค่ะ ร้านสปาตัวอย่าง ค่ะ ยินดีให้บริการค่ะ');
+  const en = (await Call.start({ dialed: NUM.A.dialed, ani: CALLER, lang: 'en', now: () => clock.now() })).call;
+  assert.equal(en.turns[0].text, "Hi, you've reached Sample Day Spa. How can I help you today?", 'the English name, no AI clause');
+
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  let asked = 0;
+  brain = () => { asked++; return text(asked === 1 ? 'ดิฉันเป็นพนักงานของร้านค่ะ' : 'ได้ค่ะ'); };
+  const rec = new Receptionist(client, th, 'stand-in', 'ร้านสปาตัวอย่าง');
+  assert.equal(await rec.respond('สวัสดีค่ะ คุยกับคนจริงอยู่หรือเปล่าคะ'), 'ดิฉันเป็นผู้ช่วย AI ของร้านค่ะ ถ้าต้องการคุยกับพนักงาน บอกได้เลยนะคะ มีอะไรให้ช่วยไหมคะ', 'a greeting with the question is only the question (18 Nov 2026: it went to the model)');
+  assert.equal(asked, 0, 'the runtime answers; the model is not asked');
+  assert.equal(await rec.respond('อ้อ ค่ะ แล้วร้านเปิดวันอาทิตย์ไหม'), 'ดิฉันเป็นผู้ช่วย AI ของร้านค่ะ ถ้าต้องการคุยกับพนักงาน บอกได้เลยนะคะ', 'a model claiming to be staff is replaced by the truth');
+  assert.deepEqual(rec.events, ['asked_if_ai', 'claimed_human']);
+  brain = () => text('ได้ค่ะ บอกวันและเวลาที่สะดวกได้เลยค่ะ');
+  const both = await rec.respond('เป็นหุ่นยนต์หรือเปล่าคะ อยากจองนวดไทยพรุ่งนี้');
+  assert.equal(both, 'ดิฉันเป็นผู้ช่วย AI ของร้านค่ะ ถ้าต้องการคุยกับพนักงาน บอกได้เลยนะคะ ได้ค่ะ บอกวันและเวลาที่สะดวกได้เลยค่ะ', 'the truth first, then the request is answered');
+});
+
 test('a malformed tool call never reaches the gateway: the model is told what was wrong', async () => {
   const clock = await fresh();
   const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
@@ -452,25 +487,64 @@ test('promisesRelay: "I\'ll send your question to the team" caught; offers and r
     assert.ok(!promisesRelay(t), `not a promise: ${t}`);
 });
 
-test('a promised relay that was not made: asked again, the model sends the question and the runtime reads the expectation', async () => {
+test('a promised relay that was not made: asked again, the model sends the question; the runtime reads it back and only the yes sends it', async () => {
   const clock = await fresh();
   const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
   const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
   let step = 0;
+  const ask = tool('request_owner_answer', { question_text: 'ร้านมีที่จอดรถไหม', summary_source: 'model', reply_target: { kind: 'ani' } });
   brain = () => {
     step++;
     if (step === 1) return text('จะส่งคำถามให้ทางทีมงานแจ้งกลับทางข้อความค่ะ');
-    if (step === 2) return tool('record_consent', { purpose: 'service_followup', target: 'ani', question_text: 'ร้านมีที่จอดรถไหม' });
-    if (step === 3) return tool('request_owner_answer', { question_text: 'ร้านมีที่จอดรถไหม', summary_source: 'model', reply_target: { kind: 'ani' } });
+    if (step === 2 || step === 3) return ask;
     return text('ค่ะ');
   };
   bodies.length = 0;
   const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
   const said = await rec.respond('ใช่ค่ะ ใช้เบอร์นี้ ส่งข้อความได้ค่ะ');
-  assert.deepEqual(rec.events, ['relay_promise_without_tool']);
+  assert.deepEqual(rec.events, ['relay_promise_without_tool', 'question_read_back']);
   assert.match(bodies[1].body.messages[0].content, /nothing was sent/);
-  assert.ok(call.outcomes.includes('pq_created'), 'the question really went to the team');
-  assert.ok(said.length > 0 && !said.includes('จะส่งคำถามให้ทางทีมงาน'));
+  assert.equal(said, 'ขอทวนคำถามนะคะ: “ร้านมีที่จอดรถไหม” ถูกต้องไหมคะ ถ้าถูกต้อง ให้ทีมงานส่งคำตอบเป็นข้อความไปที่เบอร์ที่ลงท้ายด้วย 99 ได้ไหมคะ'.replace('99', CALLER.slice(-2)));
+  assert.equal(rec.lastSource, 'runtime');
+  assert.ok(!call.outcomes.includes('pq_created'), 'nothing goes to the team before the caller answers the read-back');
+  const before = call.turns.length;
+  await rec.respond('ถูกต้องค่ะ');
+  assert.ok(call.outcomes.includes('pq_created'), 'the yes sends it');
+  const consent = await withTenant(A, async tx => (await tx.query(`select evidence from consents where purpose = 'service_followup'`)).rows);
+  assert.equal(consent.length, 1);
+  assert.equal(consent[0].evidence.turn, String(before), 'the permission to text is the caller\'s yes to the read-back');
+});
+
+test('a question read back and then corrected, or with the text refused, never reaches the team', async () => {
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  // The model always tries to send; after a refusal it answers in words.
+  brain = msgs => msgs.at(-1).role === 'tool' ? text('ได้ค่ะ') : tool('request_owner_answer', { question_text: 'ร้านมีที่จอดรถไหม', summary_source: 'model', reply_target: { kind: 'ani' } });
+  for (const [answer, event] of [['ไม่ใช่ค่ะ อยากถามว่าจอดได้นานแค่ไหน', 'question_corrected'], ['ถูกค่ะ แต่ไม่ต้องส่งข้อความนะคะ', 'question_declined'], ['ไม่ต้องค่ะ', 'question_declined']] as const) {
+    const clock = await fresh();
+    const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+    const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+    assert.match(await rec.respond('ช่วยถามทีมงานเรื่องที่จอดรถให้หน่อยค่ะ'), /^ขอทวนคำถามนะคะ/);
+    await rec.respond(answer);
+    assert.ok(rec.events.includes(event), `${answer}: ${rec.events.join(', ')}`);
+    assert.ok(!call.outcomes.includes('pq_created'), `${answer}: nothing sent`);
+    const n = await withTenant(A, async tx => (await tx.query(`select count(*)::int n from consents where purpose = 'service_followup'`)).rows[0].n);
+    assert.equal(n, 0, `${answer}: no permission recorded`);
+  }
+});
+
+test('an answer the owner saved from a Thai question is found in English when the question comes in both languages', async () => {
+  const clock = await fresh();
+  const { keywordsOf } = await import('../src/knowledge.ts');
+  await withTenant(A, tx => tx.query(`insert into knowledge_articles (tenant_id, id, version, topic, keywords, question_general, answer_text, audience, provenance, status,
+      approved_by, approved_at, effective_from, review_by) values ($1, gen_random_uuid(), 1, 'owner_answer', $2, $3, $4, array['speakable','messageable'], 'owner_reply:test', 'published', 'owner', $5, $5, $6)`,
+    [A, keywordsOf('ที่ร้านมีที่จอดรถไหมคะ'), 'ที่ร้านมีที่จอดรถไหมคะ', 'มีที่จอดรถหน้าร้าน 3 คันค่ะ', clock.now(), new Date('2027-02-01T00:00:00Z')]));
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, lang: 'en', now: () => clock.now() });
+  const en = await call.tool('get_business_facts', { question: 'Do you have parking at the spa?' });
+  assert.equal(en.data.status, 'no_answer', 'the English words alone do not find a Thai answer');
+  const both = await call.tool('get_business_facts', { question: 'Do you have parking at the spa?', question_other_language: 'ที่ร้านมีที่จอดรถไหม' });
+  assert.equal(both.data.status, 'answer');
+  assert.equal(both.data.facts[0].text, 'มีที่จอดรถหน้าร้าน 3 คันค่ะ');
+  assert.ok(TOOL_SPECS.find(t => t.name === 'get_business_facts')!.input_schema.properties.question_other_language, 'the model is offered the field');
 });
 
 test('an unknown service name says it is the service, with the menu — not "no free times"', async () => {
