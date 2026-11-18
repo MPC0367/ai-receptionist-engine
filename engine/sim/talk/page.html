@@ -154,6 +154,9 @@
   .opt small { grid-column: 2; color: var(--muted); font-size: 12.5px; }
   .check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
   .check input { accent-color: var(--accent); }
+  .namefield { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; }
+  .namefield input { width: 11em; border: 1px solid var(--line); background: var(--surface-2); border-radius: 10px; padding: 7px 10px; outline: none; }
+  .namefield input:focus { border-color: var(--accent); }
   .err { color: var(--bad); font-size: 13px; }
 
   /* Panel */
@@ -296,14 +299,15 @@
           <div id="modelOpts"></div>
         </fieldset>
         <label class="check"><input type="checkbox" id="fresh" checked> Start with a fresh spa diary (untick to keep bookings from the last call)</label>
+        <label class="namefield">The receptionist's name <input id="persona" value="มิ้นท์" maxlength="24" autocomplete="off"></label>
         <label class="check"><input type="checkbox" id="disclose"> The greeting says it is an AI assistant (asked, it always says so)</label>
         <div class="err" id="setupErr" role="alert"></div>
         <div style="display:flex; gap:8px; justify-content:flex-end">
           <button type="button" class="btn" id="cancelSetup" hidden>Cancel</button>
           <button type="submit" class="btn btn--primary" id="startBtn">Call the spa</button>
         </div>
-        <p class="note">A test line from O2 Design Studio, one call at a time. What you say is handled on O2's test computer and kept with the fictional spa's records; the receptionist's words are voiced by Google's Gemini. Please use made-up names and details.</p>
-        <p>On a voice call you speak, it answers out loud, then listens again; it says "one moment" while it works (a reply takes a few seconds, the first one longer while the model loads). Use Safari or Chrome and allow the microphone.</p>
+        <p class="note">A test line from O2 Design Studio, one call at a time. What you say is kept with the fictional spa's records on O2's test computer and is answered by the model you pick (Gemini runs at Google; the others on that computer); the receptionist's words are voiced by Google's Gemini. Please use made-up names and details.</p>
+        <p>On a voice call you speak, it answers out loud, then listens again; it sends your words when you stop talking, so there is nothing to press. Use Safari or Chrome and allow the microphone.</p>
       </form>
     </div>
   </section>
@@ -592,8 +596,7 @@ function renderIdeas() {
 /* ---------- Voice call: the browser's own speech service hears you; the Mac's voices answer ---------- */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const TTS = 'speechSynthesis' in window;
-const voice = { on: false, muted: false, rec: null, listening: false, broken: '', started: 0, tick: null, lt: null, fillers: [] };
-const FILLER = { th: ['สักครู่นะคะ', 'กำลังตรวจสอบให้อยู่นะคะ', 'ขออีกนิดนะคะ'], en: ['One moment, please.', "I'm still checking for you.", 'Almost there.'] };
+const voice = { on: false, muted: false, rec: null, listening: false, broken: '', started: 0, tick: null, lt: null, };
 const lang = () => view?.call?.lang ?? 'th';
 function setupVoice() {
   $('#voiceNote').textContent = SR ? 'Voice calls: your browser’s speech service hears you; Gemini’s voice answers (what it says goes to Google’s free tier: use made-up names).'
@@ -636,28 +639,63 @@ function speakThen(text, l, done, onStart) {
   const c = choice(l);
   if (!c.startsWith('g:')) { macSpeak(text, l, done, onStart); return; }
   const gen = audioQ.gen;
-  const audio = fetch('/api/tts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, lang: l, voice: c.slice(2) }) })
-    .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `voice ${r.status}`); return r.arrayBuffer(); });
+  const reply = fetch('/api/tts', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, lang: l, voice: c.slice(2) }) })
+    .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `voice ${r.status}`); return r; });
   audioQ.waiting++;
   audioQ.chain = audioQ.chain.then(async () => {
     if (gen !== audioQ.gen) return;
-    let buf;
-    try { buf = await audio; } catch (e) {
+    let r;
+    try { r = await reply; } catch (e) {
       $('#voiceNote').textContent = e.message;
       if (gen === audioQ.gen) await new Promise(res => macSpeak(text, l, res, onStart));
       return;
     }
     if (gen !== audioQ.gen) return;
     unlockAudio();
-    const pcm = await actx.decodeAudioData(buf);
-    if (gen !== audioQ.gen) return;
-    await new Promise(res => { const src = actx.createBufferSource(); src.buffer = pcm; src.connect(hudAnalyser() ?? actx.destination); src.onended = res; audioQ.current = src; src.start(); onStart?.(); });
+    if ((r.headers.get('content-type') || '').includes('audio/wav')) {
+      // A line said before: the whole of it at once.
+      const pcm = await actx.decodeAudioData(await r.arrayBuffer());
+      if (gen !== audioQ.gen) return;
+      await new Promise(res => { const src = actx.createBufferSource(); src.buffer = pcm; src.connect(hudAnalyser() ?? actx.destination); src.onended = res; audioQ.current = src; src.start(); onStart?.(); });
+      audioQ.current = null;
+      return;
+    }
+    // A new line streams as 16-bit PCM at 24 kHz: each piece is queued right after the one before, the first as soon as
+    // it arrives (about a second, against three for the whole line).
+    const sources = [], reader = r.body.getReader();
+    audioQ.current = { stop: () => { for (const x of sources) try { x.stop(); } catch {} } };
+    let at = 0, carry = null, first = true, last = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done || gen !== audioQ.gen) break;
+      let bytes = value;
+      if (carry) { const m = new Uint8Array(carry.length + bytes.length); m.set(carry); m.set(bytes, carry.length); bytes = m; carry = null; }
+      if (bytes.length % 2) { carry = bytes.slice(-1); bytes = bytes.slice(0, -1); }
+      if (!bytes.length) continue;
+      const n = bytes.length / 2, view16 = new DataView(bytes.buffer, bytes.byteOffset, bytes.length), b = actx.createBuffer(1, n, 24000), ch = b.getChannelData(0);
+      for (let i = 0; i < n; i++) ch[i] = view16.getInt16(i * 2, true) / 32768;
+      const src = actx.createBufferSource(); src.buffer = b; src.connect(hudAnalyser() ?? actx.destination);
+      at = Math.max(at, actx.currentTime + 0.05); src.start(at); at += b.duration;
+      sources.push(src); last = src;
+      if (first) { first = false; onStart?.(); }
+    }
+    if (last && gen === audioQ.gen) await new Promise(res => { last.onended = res; if (actx.currentTime >= at) res(); });
     audioQ.current = null;
   }).catch(() => {}).finally(() => { audioQ.waiting--; if (gen === audioQ.gen) done?.(); });
 }
 /** The Mac's voice: in pieces (one long utterance can stall), with a guard if a browser never says it ended. */
+const THAI_HOURS = { 6: 'หกโมงเช้า', 7: 'เจ็ดโมงเช้า', 8: 'แปดโมงเช้า', 9: 'เก้าโมงเช้า', 10: 'สิบโมงเช้า', 11: 'สิบเอ็ดโมง', 12: 'เที่ยง', 13: 'บ่ายโมง', 14: 'บ่ายสอง', 15: 'บ่ายสาม', 16: 'บ่ายสี่', 17: 'ห้าโมงเย็น', 18: 'หกโมงเย็น', 19: 'หนึ่งทุ่ม', 20: 'สองทุ่ม', 21: 'สามทุ่ม' };
+/** What is said aloud for a written line (the server does the same for Gemini's voice): no year, times as people say them. */
+function spoken(text, l) {
+  let t = text;
+  if (l === 'th') t = t.replace(/(?:เวลา\s*)?\d{1,2}[:.]\d{2}\s*น\.?\s*\(([^)]+)\)/g, 'เวลา$1').replace(/\s(25|20)\d{2}(?=\s|$)/g, '')
+    .replace(/(\d{1,2})[:.](\d{2})\s*น\.?/g, (all, h, m) => { const b = THAI_HOURS[+h]; return !b ? all : +m === 0 ? b : +m === 30 ? `${b}ครึ่ง` : `${b} ${+m} นาที`; });
+  else t = t.replace(/\b(\d{1,2}):00\s*([AP]M)\b/gi, '$1 $2').replace(/\s20\d{2}\b/g, '');
+  return t.replace(/\(([^)]*)\)/g, '$1').replace(/:\s/g, ' ').replace(/[?？]+/g, '').replace(/\s{2,}/g, ' ').trim();
+}
 function macSpeak(text, l, done, onStart) {
   if (!TTS || !text) { done?.(); return; }
+  text = spoken(text, l);
   const ps = []; let cur = '';
   for (const w of text.split(/\s+/)) { if (cur && (cur + ' ' + w).length > 140) { ps.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; }
   if (cur) ps.push(cur);
@@ -705,7 +743,7 @@ function startVoice(greet) {
   if (greet) { callState('thinking', ''); speakThen(view.call.greeting, lang(), listenSoon, () => callState('speaking', view.call.greeting)); } else listenSoon();
 }
 function stopVoice() {
-  voice.on = false; clearInterval(voice.tick); clearTimeout(voice.lt); stopFillers();
+  voice.on = false; clearInterval(voice.tick); clearTimeout(voice.lt);
   try { voice.rec?.abort(); } catch {}
   voice.listening = false; stopSpeaking();
   $('#callbar').hidden = true; $('#stage').hidden = true; $('#ideas').hidden = false; hudStop(); renderAll();
@@ -812,16 +850,20 @@ function listen() {
   if (voice.listening) return;
   const r = voice.rec = new SR();
   r.lang = lang() === 'th' ? 'th-TH' : 'en-US'; r.interimResults = true; r.continuous = false;
-  let final = '';
+  // Sent when the caller stops talking: about a second with no new words ends the turn, and what was heard goes,
+  // final or not (Safari often never marks it final, and the words sat in the box until Send was pressed).
+  let final = '', interim = '', quiet = null;
   r.onresult = e => {
-    let interim = ''; final = '';
+    interim = ''; final = '';
     for (const x of e.results) { if (x.isFinal) final += x[0].transcript; else interim += x[0].transcript; }
     const t = (final || interim).trim(); $('#text').value = t; if (t) callState('listening', t);
+    clearTimeout(quiet);
+    if (t) quiet = setTimeout(() => { try { r.stop(); } catch {} }, final ? 450 : 1100);
   };
   r.onerror = e => { if (['not-allowed', 'service-not-allowed', 'network', 'audio-capture', 'language-not-supported'].includes(e.error)) voice.broken = e.error; };
   r.onend = () => {
-    voice.listening = false;
-    const t = final.trim();
+    voice.listening = false; clearTimeout(quiet);
+    const t = (final || interim).trim();
     if (t) say(t);
     else if (voice.broken) callState('broken');
     else if (voice.on && !voice.muted) listenSoon();
@@ -829,12 +871,6 @@ function listen() {
   voice.listening = true; callState('listening', '');
   try { r.start(); } catch { voice.listening = false; }
 }
-function startFillers() {
-  stopFillers();
-  const l = lang();
-  voice.fillers = [1800, 9000, 17000].map((ms, i) => setTimeout(() => { if (pending && voice.on) { speakThen(FILLER[l][i], l); $('#callCaption').textContent = FILLER[l][i]; } }, ms));
-}
-function stopFillers() { voice.fillers.forEach(clearTimeout); voice.fillers = []; }
 $('#voiceSel').addEventListener('change', e => { try { localStorage.setItem(`talk.voice.${lang()}`, e.target.value); } catch {} });
 $('#speak').addEventListener('change', () => { if ($('#speak').checked) unlockAudio(); });
 $('#talkNow').addEventListener('click', () => {
@@ -856,7 +892,7 @@ async function say(text) {
   if (pending || !text.trim() || !view?.call || view.call.ended) return;
   pending = { text: text.trim(), note: 'Thinking…' };
   $('#text').value = ''; lock(true); renderThread();
-  if (voice.on) { try { voice.rec?.abort(); } catch {} voice.listening = false; callState('thinking', pending.text); startFillers(); }
+  if (voice.on) { try { voice.rec?.abort(); } catch {} voice.listening = false; callState('thinking', pending.text); }
   const poll = setInterval(async () => {
     try {
       const v = await api('/api/session'), b = v.call?.busy;
@@ -869,13 +905,11 @@ async function say(text) {
   }, 900);
   try {
     const turn = await api('/api/say', { text: pending.text });
-    stopFillers();
     view = await api('/api/session');
     pending = null; renderThread(); renderSteps();
     if (voice.on) { const r = turn.reply; speakThen(r, view.call.lang, listenSoon, () => callState('speaking', r)); }
     else if ($('#speak').checked) speakThen(turn.reply, view.call.lang);
   } catch (e) {
-    stopFillers();
     pending = null; view = await api('/api/session').catch(() => view); renderThread();
     if (voice.on) { callState('listening', e.message); listenSoon(); } else alert(e.message);
   } finally {
@@ -930,7 +964,7 @@ $('#setupForm').addEventListener('submit', async e => {
   if (wantVoice) ring();
   $('#startBtn').disabled = true; $('#startBtn').textContent = 'Ringing…'; $('#setupErr').textContent = '';
   try {
-    view = await api('/api/start', { lang: f.get('lang'), caller: f.get('caller'), model: f.get('model'), fresh: $('#fresh').checked, disclose: $('#disclose').checked });
+    view = await api('/api/start', { lang: f.get('lang'), caller: f.get('caller'), model: f.get('model'), fresh: $('#fresh').checked, disclose: $('#disclose').checked, name: $('#persona').value.trim() });
     $('#setup').hidden = true; lastSeen = { texts: 0, owner: 0, diary: '' }; renderAll(); await refreshState();
     if (wantVoice) startVoice(true);
     else { if ($('#speak').checked) speakThen(view.call.greeting, view.call.lang); $('#text').focus(); }
@@ -938,6 +972,10 @@ $('#setupForm').addEventListener('submit', async e => {
   finally { $('#startBtn').disabled = false; $('#startBtn').textContent = 'Call the spa'; }
 });
 $('#cancelSetup').addEventListener('click', () => { $('#setup').hidden = true; });
+// The name follows the language until someone types their own.
+document.querySelectorAll('input[name=lang]').forEach(r => r.addEventListener('change', () => {
+  const p = $('#persona'); if (['มิ้นท์', 'Mint', ''].includes(p.value.trim())) p.value = r.value === 'th' ? 'มิ้นท์' : 'Mint';
+}));
 $('#newBtn').addEventListener('click', openSetup);
 $('#endBtn').addEventListener('click', async () => { if (voice.on) stopVoice(); view = await api('/api/end', {}); renderAll(); refreshState(); });
 $('#sayForm').addEventListener('submit', e => { e.preventDefault(); say($('#text').value); });

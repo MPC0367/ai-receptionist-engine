@@ -22,20 +22,27 @@ import { seed, A, NUM } from '../seed.ts';
 import { Call } from '../session.ts';
 import { Receptionist } from '../model/receptionist.ts';
 import { CompatClient, PROVIDERS } from '../model/free-models.ts';
+import { spoken } from './spoken.ts';
 
 process.env.RCPT_DB = 'rcpt_talk'; // read lazily by db() on first use, so setting it here is in time
 const DB = 'rcpt_talk';
 const PORT = Number(process.env.PORT ?? 4520);
 const PAGE = path.join(import.meta.dirname, 'page.html');
 const BUSINESS = 'ร้านสปาตัวอย่าง (Sample Day Spa)';
-/** The two models measured on the 16 scenarios (sim/model/FINDINGS.md). */
-const MODELS = [
-  { id: 'gemma4:12b', label: 'Gemma 4 12B', note: '16 of 16 scenarios (16 Nov 2026)' },
-  { id: 'gpt-oss:20b', label: 'gpt-oss 20B', note: '14 of 16 scenarios, larger and slower' },
+/**
+ * The receptionist's model. Gemini 3.5 Flash-Lite answers in about a second on the free tier (the owner, 18 Nov 2026:
+ * "increase the speed of the processor"), so it comes first when there is a key; Gemma and gpt-oss run on this Mac.
+ */
+const ALL_MODELS = [
+  { id: 'gemini-3.5-flash-lite', provider: 'gemini' as const, label: 'Gemini 3.5 Flash-Lite', note: 'fast: about a second a reply (free tier; the words go to Google)' },
+  { id: 'gemma4:12b', provider: 'ollama' as const, label: 'Gemma 4 12B', note: 'on this Mac: 16 of 16 scenarios, 4 to 15 seconds a reply' },
+  { id: 'gpt-oss:20b', provider: 'ollama' as const, label: 'gpt-oss 20B', note: 'on this Mac: 14 of 16 scenarios, slower' },
 ];
+const MODELS = ALL_MODELS.filter(m => m.provider !== 'gemini' || process.env.GEMINI_API_KEY);
 /** Fictional caller numbers (INV-12). */
 const CALLERS = { new: '+66812349001', returning: '+66812349002' } as const;
-const client = new CompatClient({ provider: 'ollama' });
+const clients = { ollama: new CompatClient({ provider: 'ollama' }), gemini: new CompatClient({ provider: 'gemini', minIntervalMs: 0 }) };
+const clientFor = (model: string) => clients[ALL_MODELS.find(m => m.id === model)?.provider ?? 'ollama'];
 
 /**
  * The receptionist's voice: Gemini's speech models, as in O2's video voice-overs (the owner, 18 Nov 2026: "make it sound
@@ -50,8 +57,8 @@ const VOICES = [
   { id: 'Kore', label: 'Kore · firm' }, { id: 'Charon', label: 'Charon · the O2 reels (male)' },
 ];
 const NOTES = {
-  th: "A warm, calm receptionist at a Thai day spa answering the phone in Thai. Natural, friendly and unhurried, like a real person talking, not an announcer. Say exactly the transcript.",
-  en: "A warm, calm receptionist at a day spa in Bangkok answering the phone in English. Natural, friendly and unhurried, like a real person talking, not an announcer. Say exactly the transcript.",
+  th: "A young Thai woman at the front desk of a Bangkok day spa, on the phone with a customer. She sounds like a real person in conversation, not a recording: relaxed, warm, a smile in her voice, everyday Thai with natural rhythm and the small pauses people make, soft ค่ะ and นะคะ. Not an announcer, not reading aloud, not too slow. Say exactly the transcript, nothing added.",
+  en: "A young woman at the front desk of a Bangkok day spa, on the phone with a customer, speaking English with a light Thai accent. She sounds like a real person in conversation, not a recording: relaxed, warm, a smile in her voice, natural rhythm and small pauses. Not an announcer, not reading aloud, not too slow. Say exactly the transcript, nothing added.",
 };
 const TTS_DIR = path.join(import.meta.dirname, '..', '..', '.data', 'tts');
 /** Until when each model is resting: a minute for the per-minute limit, until the next Pacific midnight for the daily one. */
@@ -67,40 +74,72 @@ function wav(pcm: Buffer, rate = 24000) {
   h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([h, pcm]);
 }
-async function speech(text: string, lang: 'th' | 'en', voice: string): Promise<Buffer> {
+/**
+ * The receptionist's voice for one line, streamed: Gemini sends the audio in pieces (the first after about a second,
+ * against about three for the whole line, 18 Nov 2026), and the page plays each as it arrives. A line said before comes
+ * from .data/tts at once. Returns false when no voice model will answer (the page then uses the Mac's voice).
+ */
+async function speech(res: http.ServerResponse, written: string, lang: 'th' | 'en', voice: string, headers: Record<string, string>): Promise<boolean> {
+  const text = spoken(written, lang);
   const key = process.env.GEMINI_API_KEY;
   const v = VOICES.some(x => x.id === voice) ? voice : VOICES[0].id;
   const file = path.join(TTS_DIR, createHash('sha256').update(`${v}|${lang}|${text}`).digest('hex').slice(0, 32) + '.wav');
-  if (existsSync(file)) return readFileSync(file);
-  if (!key) throw new HttpError(503, 'No Gemini key for the voice: the Mac voice is answering.');
+  if (existsSync(file)) { res.writeHead(200, { ...headers, 'content-type': 'audio/wav' }); res.end(readFileSync(file)); return true; }
+  if (!key) return false;
   for (const model of TTS_MODELS) {
     if ((resting.get(model) ?? 0) > Date.now()) continue;
     let r: Response;
     try {
-      r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`, {
         method: 'POST', signal: AbortSignal.timeout(25_000), headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify({ contents: [{ parts: [{ text: `### DIRECTOR'S NOTES\n${NOTES[lang]}\n\n### TRANSCRIPT\n${text}` }] }],
           generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: v } } } } }),
       });
     } catch { resting.set(model, Date.now() + 30_000); continue; }
-    const j: any = await r.json().catch(() => ({}));
-    if (r.status === 429) { resting.set(model, JSON.stringify(j).includes('PerDay') ? pacificMidnight() : Date.now() + 60_000); continue; }
-    const part = j?.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)?.inlineData;
-    if (!r.ok || !part) { resting.set(model, Date.now() + 30_000); continue; }
-    const pcm = Buffer.from(part.data, 'base64'), rate = Number(/rate=(\d+)/.exec(part.mimeType ?? '')?.[1] ?? 24000);
-    const out = pcm.subarray(0, 4).toString() === 'RIFF' ? pcm : wav(pcm, rate);
-    mkdirSync(TTS_DIR, { recursive: true }); writeFileSync(file, out);
-    return out;
+    if (!r.ok || !r.body) {
+      const err = await r.text().catch(() => '');
+      resting.set(model, r.status === 429 ? (err.includes('PerDay') ? pacificMidnight() : Date.now() + 60_000) : Date.now() + 30_000);
+      continue;
+    }
+    // Server-sent events, one piece of 16-bit PCM (24 kHz, mono) in each; passed on as they come, kept for the cache.
+    const pieces: Buffer[] = [];
+    let buf = '', started = false, ok = true;
+    const dec = new TextDecoder();
+    try {
+      for await (const part of r.body as any) {
+        buf += dec.decode(part, { stream: true }).replace(/\r/g, '');
+        let i: number;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const ev = buf.slice(0, i); buf = buf.slice(i + 2);
+          const line = ev.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          const data = JSON.parse(line.slice(6))?.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)?.inlineData?.data;
+          if (!data) continue;
+          const pcm = Buffer.from(data, 'base64');
+          if (!started) { res.writeHead(200, { ...headers, 'content-type': 'audio/L16; rate=24000; channels=1' }); started = true; }
+          pieces.push(pcm); res.write(pcm);
+        }
+      }
+    } catch { ok = false; }
+    if (!started) { resting.set(model, Date.now() + 30_000); continue; }
+    res.end();
+    if (ok) { mkdirSync(TTS_DIR, { recursive: true }); writeFileSync(file, wav(Buffer.concat(pieces))); }
+    return true;
   }
-  throw new HttpError(429, 'The Gemini voice is used up for now: the Mac voice is answering.');
+  return false;
 }
 
-/** The talk page's choice whether the greeting says it is an AI (the tenant policy ai_disclosure; asked, it always says so). */
-async function setDisclosure(on: boolean) {
+/**
+ * The talk page's choices for the greeting: whether it says it is an AI (policy ai_disclosure; asked, it always says so)
+ * and the receptionist's name (policy assistant_name).
+ */
+async function setGreeting(disclose: boolean, name: string, lang: 'th' | 'en') {
   const c = new pg.Client({ host: '127.0.0.1', port: 54421, user: 'rcpt', database: DB });
   await c.connect();
-  try { await c.query(`update policies set body = body || jsonb_build_object('ai_disclosure', $2::boolean) where tenant_id = $1`, [A, on]); }
-  finally { await c.end(); }
+  try {
+    await c.query(`update policies set body = body || jsonb_build_object('ai_disclosure', $2::boolean, 'assistant_name', jsonb_build_object($3::text, $4::text)) where tenant_id = $1`,
+      [A, disclose, lang, name]);
+  } finally { await c.end(); }
 }
 
 type Before = { since: number; tools: number; calls: number; events: number; held: number };
@@ -117,8 +156,7 @@ const IDLE_MS = 4 * 60_000;
 const busyFor = (who: string) => !!session && !session.ended && session.owner !== who && Date.now() - session.lastActive < IDLE_MS;
 const BUSY = 'The line is busy: someone else is on a call with the receptionist. Try again in a few minutes.';
 const mine = (who: string) => { if (!session || session.owner !== who) throw new HttpError(403, 'This call belongs to someone else: start your own when the line is free.'); return session; };
-/** The receptionist's "one moment" lines, which the page may ask to be voiced at any time in a call. */
-const FILLERS = ['สักครู่นะคะ', 'กำลังตรวจสอบให้อยู่นะคะ', 'ขออีกนิดนะคะ', 'One moment, please.', "I'm still checking for you.", 'Almost there.'];
+
 let session: Session | null = null, counter = 0;
 /** What the person sent as the owner on LINE (the sandbox keeps only what the system sends). */
 const ownerSent: Array<{ at: string; text: string }> = [];
@@ -140,18 +178,20 @@ async function prebook() {
   if (r.stage !== 'create' || !r.result.ok) throw new Error(`could not make the returning caller's booking (${r.stage})`);
 }
 
-async function start(o: { lang?: string; model?: string; caller?: string; fresh?: boolean; disclose?: boolean }, who: string) {
+async function start(o: { lang?: string; model?: string; caller?: string; fresh?: boolean; disclose?: boolean; name?: string }, who: string) {
   if (busyFor(who)) throw new HttpError(409, BUSY);
   const lang = o.lang === 'en' ? 'en' : 'th';
   const model = MODELS.some(m => m.id === o.model) ? o.model! : MODELS[0].id;
   const caller = ['new', 'returning', 'withheld'].includes(o.caller ?? '') ? o.caller! : 'new';
+  const client = clientFor(model);
   const problems = await client.preflight([model]);
   if (problems.length) throw new HttpError(503, problems.join(' '));
   if (session && !session.ended) await end(session.owner);
-  void warm(model);
+  if (ALL_MODELS.find(m => m.id === model)?.provider === 'ollama') void warm(model);
   if (o.fresh !== false) { await seed(DB); ownerSent.length = 0; }
   if (caller === 'returning' && o.fresh !== false) await prebook();
-  await setDisclosure(o.disclose === true);
+  const name = String(o.name ?? '').replace(/[^\p{L}\p{M} .'-]/gu, '').trim().slice(0, 24) || (lang === 'th' ? 'มิ้นท์' : 'Mint');
+  await setGreeting(o.disclose === true, name, lang);
   const ani = caller === 'withheld' ? null : CALLERS[caller as 'new' | 'returning'];
   const { call, unrouted } = await Call.start({ dialed: NUM.A.dialed, ani, lang, now: () => new Date() });
   if (unrouted) throw new HttpError(500, 'The sample spa is missing from the talk database: start a fresh call.');
@@ -289,10 +329,11 @@ const server = http.createServer(async (req, res) => {
   const who: string = fresh ? randomUUID() : cookies.talk_id;
   const https = req.headers['x-forwarded-proto'] === 'https' || String(req.headers['cf-visitor'] ?? '').includes('https');
   const ip = String(req.headers['cf-connecting-ip'] ?? req.socket.remoteAddress ?? '');
+  const base: Record<string, string> = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex',
+    ...(fresh ? { 'set-cookie': `talk_id=${who}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${https ? '; Secure' : ''}` } : {}) };
   const send = (status: number, body: unknown, type = 'application/json; charset=utf-8') => {
-    res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY',
-      'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex',
-      ...(fresh ? { 'set-cookie': `talk_id=${who}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${https ? '; Secure' : ''}` } : {}) });
+    res.writeHead(status, { ...base, 'content-type': type });
     res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   };
   const host = (req.headers.host ?? '').toLowerCase();
@@ -311,11 +352,12 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/end') return send(200, await end(who));
       if (url.pathname === '/api/owner') return send(200, await owner(body, who));
       if (url.pathname === '/api/tts') {
-        // Only what the receptionist said in the visitor's own call, or a "one moment" line: the voice is O2's quota.
+        // Only what the receptionist said in the visitor's own call: the voice is O2's quota.
         const text = String(body.text ?? '').trim().slice(0, 600), s = mine(who);
         const said = s.call.turns.filter(t => t.who === 'ai').map(t => t.text).join(' ');
-        if (!text || !(FILLERS.includes(text) || said.includes(text))) throw new HttpError(403, 'Only the receptionist\'s own words are voiced.');
-        return send(200, await speech(text, body.lang === 'en' ? 'en' : 'th', String(body.voice ?? '')), 'audio/wav');
+        if (!text || !said.includes(text)) throw new HttpError(403, 'Only the receptionist\'s own words are voiced.');
+        if (!await speech(res, text, body.lang === 'en' ? 'en' : 'th', String(body.voice ?? ''), base)) throw new HttpError(429, 'The Gemini voice is used up for now: the Mac voice is answering.');
+        return;
       }
     }
     send(404, { error: 'Not here.' });

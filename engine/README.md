@@ -14,7 +14,7 @@ pushes them. Nothing here is deployed.
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 127 tests (resets the rcpt_test database per test)
+npm test              # 129 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -112,14 +112,16 @@ npm run talk          # http://127.0.0.1:4520 (preview entry `ai-receptionist-ta
 microphone): you speak, the browser's speech service turns it into words, the receptionist answers out loud in
 Gemini's voice (the engine behind O2's video voice-overs: `GEMINI_API_KEY` from your shell, which is why the preview
 starts in a login shell; the free tier allows about 10 lines a day per model, so four models take turns, and every line
-is kept in `.data/tts`), says "สักครู่นะคะ" while it works, and listens again when it has finished. The bar shows
+is kept in `.data/tts`), streams the voice so it starts about a second after the reply, and listens again when it has finished. The bar shows
 Listening / Thinking / Speaking, with Talk now (interrupt), Mute and Hang up; the menu picks the voice (Gemini's
 Sulafat by default, Charon as in the reels, or a Mac voice, which also takes over when the Gemini quota is used up).
 What the receptionist says goes to Google's free tier: use made-up names. The greeting does not say it is an AI unless
 you tick it (policy `ai_disclosure`); asked, it always says so.
 
-You are the caller; the receptionist is the free model you pick on this Mac (Gemma 4 12B by default, gpt-oss 20B as
-the other) behind the same runtime the scenarios use, so every guard applies. Choose Thai or English and who is calling:
+You are the caller; the receptionist is the model you pick behind the same runtime the scenarios use, so every guard
+applies: Gemini 3.5 Flash-Lite by default (free tier, the fastest when Google is not busy; the words go to Google), or
+Gemma 4 12B or gpt-oss 20B on this Mac. It has a name (มิ้นท์ / Mint by default, set when you start), speaks in
+everyday phrasing, and sends your words by itself when you stop talking. Choose Thai or English and who is calling:
 a new caller (+66 81 234 9001), a returning caller "บี" (+66 81 234 9002) who already has a Thai massage the day after
 tomorrow at 15:00, or a withheld number. Dates are today's real ones in Bangkok. Type, or press the microphone in
 Safari or Chrome (the browser's own speech service hears you; "Read the replies aloud" uses the Mac's voices; "Keep

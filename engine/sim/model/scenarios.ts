@@ -46,7 +46,7 @@ export function scenarios(A: string): Scenario[] {
           [ap.length === 1 && bangkokDay(ap[0].starts_at) === '2026-11-13', 'booked tomorrow (Fri 13 Nov), not today']]);
       } },
     { id: 'M03-unknown-question', lang: 'th', ani: '+66812340003',
-      persona: 'คุณชื่อ "แพร" ถามว่าร้านมีที่จอดรถไหม ถ้าพนักงานบอกว่าไม่แน่ใจและเสนอส่งคำถามให้ทีมงาน ให้ตกลง ยืนยันว่าคำถามถูกต้อง ใช้เบอร์ที่โทรมา และอนุญาตให้ส่งข้อความ แล้ววางสาย',
+      persona: 'คุณชื่อ "แพร" ถามว่าร้านมีที่จอดรถไหม ถ้าพนักงานบอกว่าไม่แน่ใจและเสนอส่งคำถามให้ทีมงาน ให้ตกลง ใช้เบอร์ที่โทรมา เมื่อพนักงานทวนคำถามและถามว่าส่งข้อความได้ไหม ให้ตอบว่าถูกต้องและส่งได้ (คุณต้องตอบคำถามนี้ก่อนวางสาย) แล้วจึงวางสาย',
       grade: async (call, ev) => {
         const pq = await q(A, `select tier, status from pending_questions where conversation_id = $1`, [call.conversationId]);
         return check([[pq.length === 1, 'one pending question'], [!said(call, /\d+\s*คัน|ฟรี/), 'no guessed parking facts'],

@@ -64,7 +64,8 @@ export function toOpenAI(p: any, preset: Pick<Preset, 'reasoning' | 'stripAdditi
   for (const m of p.messages) {
     const blocks = blocksOf(m.content);
     if (m.role === 'assistant') {
-      const calls = blocks.filter(b => b.type === 'tool_use').map(b => ({ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } }));
+      const calls = blocks.filter(b => b.type === 'tool_use').map(b => ({ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+        ...(b.extra_content ? { extra_content: b.extra_content } : {}) }));
       messages.push(calls.length ? { role: 'assistant', content: textOf(blocks) || null, tool_calls: calls } : { role: 'assistant', content: textOf(blocks) });
     } else {
       for (const b of blocks.filter(x => x.type === 'tool_result')) messages.push({ role: 'tool', tool_call_id: b.tool_use_id, content: toolResultText(b.content) });
@@ -137,7 +138,10 @@ export function fromOpenAI(r: any, stats: CompatStats) {
   const content: any[] = [];
   const text = cleanText(msg.content, stats);
   if (text) content.push({ type: 'text', text });
-  for (const c of msg.tool_calls ?? []) content.push({ type: 'tool_use', id: c.id || newId(), name: c.function?.name, input: parseArgs(c.function?.arguments, stats) });
+  // Gemini 3 signs each tool call (extra_content.google.thought_signature) and refuses the next turn unless the call
+  // comes back with it (found 18 Nov 2026): keep it on the block, and toOpenAI sends it back.
+  for (const c of msg.tool_calls ?? []) content.push({ type: 'tool_use', id: c.id || newId(), name: c.function?.name, input: parseArgs(c.function?.arguments, stats),
+    ...(c.extra_content ? { extra_content: c.extra_content } : {}) });
   const u = r.usage ?? {}, cached = u.prompt_tokens_details?.cached_tokens ?? 0;
   const stop = content.some(b => b.type === 'tool_use') ? 'tool_use' : ch.finish_reason === 'length' ? 'max_tokens' : ch.finish_reason === 'content_filter' ? 'refusal' : 'end_turn';
   return { content, stop_reason: stop, usage: { input_tokens: Math.max(0, (u.prompt_tokens ?? 0) - cached), output_tokens: u.completion_tokens ?? 0, cache_read_input_tokens: cached, cache_creation_input_tokens: 0 } };

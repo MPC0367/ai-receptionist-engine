@@ -19,7 +19,17 @@ export const T = {
   // §10.1: the recording clause is present only when the tenant records (D-09: off by default in Thailand). The AI
   // clause is the tenant's policy `ai_disclosure` (on unless set false: the owner, 18 Nov 2026, "dont anounce that you're
   // an ai assistant", for the talk page); asked, the receptionist always says it is an AI (honestAnswer, receptionist.ts).
-  greeting: (name: string, lang: 'th' | 'en', recording: boolean, disclose = true) => lang === 'th'
+  // With a name (the tenant's policy assistant_name, 18 Nov 2026: "it introduces itself as in name") the greeting says
+  // it the way a front desk does ("มิ้นท์รับสายค่ะ", "this is Mint").
+  greeting: (name: string, lang: 'th' | 'en', recording: boolean, disclose = true, persona = '') => persona
+    ? lang === 'th'
+      ? disclose
+        ? `สวัสดีค่ะ ${name} ค่ะ ดิฉันชื่อ${persona} เป็นผู้ช่วย AI ของร้าน${recording ? ' การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ' : 'ค่ะ'}`
+        : `สวัสดีค่ะ ${name} ${persona}รับสายค่ะ${recording ? ' การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ' : ''}`
+      : disclose
+        ? `Hi, you've reached ${name}. I'm ${persona}, the business's AI assistant.${recording ? ' This call may be recorded to help with your booking.' : ''}`
+        : `Hi, you've reached ${name}, this is ${persona}. How can I help you today?${recording ? ' This call may be recorded to help with your booking.' : ''}`
+    : lang === 'th'
     ? disclose
       ? `สวัสดีค่ะ ${name} ค่ะ ดิฉันเป็นผู้ช่วย AI ของร้าน${recording ? ' การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ' : 'ค่ะ'}`
       : `สวัสดีค่ะ ${name} ค่ะ ยินดีให้บริการค่ะ${recording ? ' การสนทนานี้อาจมีการบันทึกเสียงเพื่อการนัดหมายค่ะ' : ''}`
@@ -59,6 +69,8 @@ export class Call {
       const policy = (await tx.query('select body from policies order by version desc limit 1')).rows[0]?.body;
       call.recordingOn = !!policy?.recording;
       call.aiDisclosure = policy?.ai_disclosure !== false;
+      const n = policy?.assistant_name;
+      call.assistantName = String((typeof n === 'string' ? n : n?.[call.lang] ?? n?.th) ?? '').trim().slice(0, 30);
       await tx.query('update conversations set recording_on = $2 where id = $1', [call.conversationId, call.recordingOn]);
       call.claims = { tenant_id: call.tenantId, location_id: route.location_id, conversation_id: call.conversationId, config_version: cfg?.number ?? 1,
         ani: o.ani, lang: call.lang, jurisdiction: country };
@@ -68,7 +80,7 @@ export class Call {
       call.tz = loc.time_zone;
       return (call.lang === 'en' ? loc.name_en ?? loc.name : loc.name) as string;
     });
-    call.say(T.greeting(name, call.lang, call.recordingOn, call.aiDisclosure));
+    call.say(T.greeting(name, call.lang, call.recordingOn, call.aiDisclosure, call.assistantName));
     return { call, unrouted: false };
   }
 
@@ -200,6 +212,8 @@ export class Call {
   recordingOn = false;
   /** Whether the greeting says it is an AI (the tenant's policy; asked, it always says so). */
   aiDisclosure = true;
+  /** The receptionist's own name, if the business gives it one (policy assistant_name, per language). */
+  assistantName = '';
   startedAt = 0;
 
   /** AT-33: the caller objects — recording stops at this offset; the call continues. */

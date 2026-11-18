@@ -236,3 +236,30 @@ conversations, Gemma 4 12B, Thai, on mains power (90 W):
   person?", the runtime always answers "ดิฉันเป็นผู้ช่วย AI ของร้านค่ะ…" itself, and a reply that claims to be a person
   or staff is replaced by that sentence (`asksIfAI`, `claimsHuman`). The blueprint's ledger still says to disclose
   anyway in Thailand (L-T14, draft Thai AI Act) and at the start of US calls (L-U3, L-U5): counsel decides before Gate B.
+
+## 18 Nov 2026 — Gemini 3.5 Flash-Lite for speed, a name, a more human voice
+
+The owner: "make the voice more human sounding … it introduces itself as in name … It doesnt have to say สักครู่ just
+increase the speed of the processor … i dont have to click send every time".
+
+- **Gemini 3.5 Flash-Lite (free tier, the key already in the shell) is the talk page's default model.** One request
+  measured about 1 s at first (Gemma 4 12B: 4–15 s), but the free tier's speed swings with Google's load: later the
+  same request took 5–9 s and a one-line request 5.5 s; 3.8 Flash answered 503 "high demand". On the 16 scenarios:
+  14/16, then 16/16 once two things were fixed: (1) **Gemini 3 signs each tool call** (`extra_content.google.thought_signature`)
+  and refuses the next turn unless the call comes back with it; `free-models.ts` now keeps and returns it; (2) with no
+  name the model **invented one for itself**, once the caller's ("แพรยังไม่มีข้อมูล…", "ให้แอมส่ง…"); the prompt now
+  says to call itself ดิฉัน, or the business's name for it, never any other name. M03's caller persona was written for
+  the old flow and hung up on the runtime's new read-back; it now answers it.
+- **A name:** policy `assistant_name` (per language); the greeting says it as a front desk does ("สวัสดีค่ะ
+  ร้านสปาตัวอย่าง มิ้นท์รับสายค่ะ", "this is Mint"), the prompt gives it, and the truthful answer uses it ("ดิฉันชื่อมิ้นท์
+  เป็นผู้ช่วย AI ของร้านค่ะ…"). Without a name nothing changes.
+- **More human speech:** the prompt asks for everyday spoken phrasing (times as "บ่ายสาม", no brackets or symbols, a first
+  name or nickname is enough); what is voiced is the spoken form of each line (`sim/talk/spoken.ts`: "15:00 น.
+  (บ่ายสามโมง)" → "บ่ายสามโมง", no year). Gemini rated both voice models 7/10, the giveaway "the flat pitch on each
+  ค่ะ", so the named Thai greeting says ค่ะ once.
+- **Faster voice:** Gemini's speech now streams (`streamGenerateContent?alt=sse`): the first audio after about 1 s
+  instead of about 3.3 s for the whole line; the page plays the pieces as they come and the whole line is cached.
+- **No fillers** ("สักครู่นะคะ" is gone, by the owner's word), and **no Send button needed**: the page sends what it
+  heard after about a second of quiet, final or not (Safari rarely marks speech final, so words sat in the box).
+- **Open:** the free tier's speed. Consistently fast replies need a faster host (Groq's free tier, an account) or a paid
+  Gemini key (a fraction of a cent a turn): the owner's choice.
