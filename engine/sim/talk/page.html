@@ -92,8 +92,6 @@
   .round--send { background: var(--btn); color: var(--accent-ink); }
   .round[disabled] { opacity: .4; cursor: default; }
   .round svg { width: 20px; height: 20px; }
-  .round.listening { background: var(--bad); color: #fff; animation: pulse 1.3s infinite; }
-  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--bad) 45%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
   .callbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 18px; background: var(--surface-2); }
   .callbar[hidden] { display: none; }
   .orb { width: 44px; height: 44px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.55), transparent 60%), var(--orb, #8e8e93); transition: background .3s; }
