@@ -10,7 +10,7 @@
  *   npm run db:start && npm run talk        → http://127.0.0.1:4520
  */
 import http from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
@@ -107,7 +107,18 @@ type Before = { since: number; tools: number; calls: number; events: number; hel
 type Turn = { you: string; reply: string; source: 'model' | 'runtime' | 'error'; ms: number; calls: number;
   steps: Receptionist['toolLog']; events: string[]; held: string[] };
 type Session = { n: number; call: Call; rec: Receptionist; lang: 'th' | 'en'; model: string; caller: string; ani: string | null;
-  ended: boolean; busy: Before | null; log: Turn[]; startedAt: string };
+  ended: boolean; busy: Before | null; log: Turn[]; startedAt: string; owner: string; lastActive: number };
+/**
+ * One line, one call at a time (18 Nov 2026: the page went public through a tunnel, to share with a colleague). The
+ * visitor who starts a call owns it (a cookie); anyone else hears that the line is busy until it ends or has been quiet
+ * for IDLE_MS, when it ends by itself.
+ */
+const IDLE_MS = 4 * 60_000;
+const busyFor = (who: string) => !!session && !session.ended && session.owner !== who && Date.now() - session.lastActive < IDLE_MS;
+const BUSY = 'The line is busy: someone else is on a call with the receptionist. Try again in a few minutes.';
+const mine = (who: string) => { if (!session || session.owner !== who) throw new HttpError(403, 'This call belongs to someone else: start your own when the line is free.'); return session; };
+/** The receptionist's "one moment" lines, which the page may ask to be voiced at any time in a call. */
+const FILLERS = ['สักครู่นะคะ', 'กำลังตรวจสอบให้อยู่นะคะ', 'ขออีกนิดนะคะ', 'One moment, please.', "I'm still checking for you.", 'Almost there.'];
 let session: Session | null = null, counter = 0;
 /** What the person sent as the owner on LINE (the sandbox keeps only what the system sends). */
 const ownerSent: Array<{ at: string; text: string }> = [];
@@ -129,13 +140,14 @@ async function prebook() {
   if (r.stage !== 'create' || !r.result.ok) throw new Error(`could not make the returning caller's booking (${r.stage})`);
 }
 
-async function start(o: { lang?: string; model?: string; caller?: string; fresh?: boolean; disclose?: boolean }) {
+async function start(o: { lang?: string; model?: string; caller?: string; fresh?: boolean; disclose?: boolean }, who: string) {
+  if (busyFor(who)) throw new HttpError(409, BUSY);
   const lang = o.lang === 'en' ? 'en' : 'th';
   const model = MODELS.some(m => m.id === o.model) ? o.model! : MODELS[0].id;
   const caller = ['new', 'returning', 'withheld'].includes(o.caller ?? '') ? o.caller! : 'new';
   const problems = await client.preflight([model]);
   if (problems.length) throw new HttpError(503, problems.join(' '));
-  if (session && !session.ended) await end();
+  if (session && !session.ended) await end(session.owner);
   void warm(model);
   if (o.fresh !== false) { await seed(DB); ownerSent.length = 0; }
   if (caller === 'returning' && o.fresh !== false) await prebook();
@@ -143,13 +155,14 @@ async function start(o: { lang?: string; model?: string; caller?: string; fresh?
   const ani = caller === 'withheld' ? null : CALLERS[caller as 'new' | 'returning'];
   const { call, unrouted } = await Call.start({ dialed: NUM.A.dialed, ani, lang, now: () => new Date() });
   if (unrouted) throw new HttpError(500, 'The sample spa is missing from the talk database: start a fresh call.');
-  session = { n: ++counter, call, rec: new Receptionist(client, call, model, BUSINESS), lang, model, caller, ani, ended: false, busy: null, log: [], startedAt: new Date().toISOString() };
-  return sessionView();
+  session = { n: ++counter, call, rec: new Receptionist(client, call, model, BUSINESS), lang, model, caller, ani, ended: false, busy: null, log: [], startedAt: new Date().toISOString(), owner: who, lastActive: Date.now() };
+  return sessionView(who);
 }
 
-async function say(text: string) {
-  const s = session;
-  if (!s || s.ended) throw new HttpError(409, 'No call is open: start one first.');
+async function say(text: string, who: string) {
+  if (!session || session.ended) throw new HttpError(409, 'No call is open: start one first.');
+  const s = mine(who);
+  s.lastActive = Date.now();
   if (s.busy) throw new HttpError(409, 'The receptionist is still answering.');
   const words = text.trim().slice(0, 600);
   if (!words) throw new HttpError(400, 'Say something first.');
@@ -164,23 +177,26 @@ async function say(text: string) {
     turn = { you: words, reply: `The model did not answer (${(e as Error).message.slice(0, 200)}). Is Ollama running? Try again.`, source: 'error',
       ms: Date.now() - b.since, calls: s.rec.usage.calls - b.calls, steps: s.rec.toolLog.slice(b.tools), events: s.rec.events.slice(b.events), held: s.rec.discarded.slice(b.held) };
   } finally {
-    s.busy = null;
+    s.busy = null; s.lastActive = Date.now();
   }
   s.log.push(turn);
   await tick().catch(() => {});
   return turn;
 }
 
-async function end() {
-  const s = session;
-  if (!s || s.ended) return sessionView();
+async function end(who: string, endedBy: 'caller' | 'max_duration' = 'caller') {
+  if (!session || session.ended) return sessionView(who);
+  const s = mine(who);
   s.ended = true;
-  await s.call.end('caller');
+  await s.call.end(endedBy);
   await tick().catch(() => {});
-  return sessionView();
+  return sessionView(who);
 }
 
-async function owner(o: { text?: string; postback?: string; label?: string }) {
+async function owner(o: { text?: string; postback?: string; label?: string }, who: string) {
+  // The owner's side of the latest call belongs to whoever made it (its questions arrive after it ends).
+  mine(who);
+  if (session) session.lastActive = Date.now();
   const now = new Date(), id = `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`;
   const text = o.text?.trim().slice(0, 1000);
   if (!text && !o.postback) throw new HttpError(400, 'Write a reply first.');
@@ -194,10 +210,10 @@ async function owner(o: { text?: string; postback?: string; label?: string }) {
   return { status: r.status, results: r.results };
 }
 
-function sessionView() {
-  const s = session;
+function sessionView(who: string) {
+  const s = session && session.owner === who ? session : null;
   return {
-    models: MODELS, callers: CALLERS, tts: { gemini: !!process.env.GEMINI_API_KEY, voices: VOICES },
+    models: MODELS, callers: CALLERS, tts: { gemini: !!process.env.GEMINI_API_KEY, voices: VOICES }, lineBusy: busyFor(who),
     call: s && { n: s.n, lang: s.lang, model: s.model, caller: s.caller, ani: s.ani, ended: s.ended, startedAt: s.startedAt,
       conversationId: s.call.conversationId, greeting: s.call.turns[0]?.text ?? '', log: s.log,
       busy: s.busy && { seconds: (Date.now() - s.busy.since) / 1000, steps: s.rec.toolLog.slice(s.busy.tools), calls: s.rec.usage.calls - s.busy.calls } },
@@ -250,27 +266,57 @@ async function readJson(req: http.IncomingMessage): Promise<any> {
   try { return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; } catch { throw new HttpError(400, 'Not JSON.'); }
 }
 
+/** Requests per visitor (by address) in a window: enough for a call, not for a flood. */
+const hits = new Map<string, number[]>();
+function limit(ip: string, kind: string, n: number, windowMs: number) {
+  const key = `${kind}|${ip}`, now = Date.now(), recent = (hits.get(key) ?? []).filter(t => now - t < windowMs);
+  if (recent.length >= n) throw new HttpError(429, 'Too many requests: wait a minute and try again.');
+  recent.push(now); hits.set(key, recent);
+}
+/**
+ * Host names this server answers: this Mac, and with TALK_PUBLIC=1 a Cloudflare quick tunnel (*.trycloudflare.com) or
+ * the name in TALK_PUBLIC_HOST. Anything else is refused, so no page elsewhere can rebind its name to this server.
+ */
+function allowedHost(host: string) {
+  if ([`127.0.0.1:${PORT}`, `localhost:${PORT}`].includes(host)) return true;
+  if (process.env.TALK_PUBLIC !== '1') return false;
+  return host.endsWith('.trycloudflare.com') || (!!process.env.TALK_PUBLIC_HOST && host === process.env.TALK_PUBLIC_HOST.toLowerCase());
+}
+
 const server = http.createServer(async (req, res) => {
+  const cookies = Object.fromEntries((req.headers.cookie ?? '').split(';').map(c => c.trim().split('=')).filter(([k, v]) => k && v));
+  const fresh = !/^[0-9a-f-]{36}$/.test(cookies.talk_id ?? '');
+  const who: string = fresh ? randomUUID() : cookies.talk_id;
+  const https = req.headers['x-forwarded-proto'] === 'https' || String(req.headers['cf-visitor'] ?? '').includes('https');
+  const ip = String(req.headers['cf-connecting-ip'] ?? req.socket.remoteAddress ?? '');
   const send = (status: number, body: unknown, type = 'application/json; charset=utf-8') => {
-    res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY',
+      'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex',
+      ...(fresh ? { 'set-cookie': `talk_id=${who}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${https ? '; Secure' : ''}` } : {}) });
     res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   };
-  // This Mac only: refuse other host names (a page elsewhere cannot rebind its name to this server).
   const host = (req.headers.host ?? '').toLowerCase();
-  if (![`127.0.0.1:${PORT}`, `localhost:${PORT}`].includes(host)) return send(421, { error: 'This server answers 127.0.0.1 only.' });
+  if (!allowedHost(host)) return send(421, { error: 'This server answers this Mac and its own tunnel only.' });
   try {
+    if (req.url?.startsWith('/api/')) limit(ip, 'api', 240, 60_000);
     const url = new URL(req.url ?? '/', `http://${host}`);
     if (req.method === 'GET' && url.pathname === '/') return send(200, readFileSync(PAGE, 'utf8'), 'text/html; charset=utf-8');
-    if (req.method === 'GET' && url.pathname === '/api/session') return send(200, sessionView());
+    if (req.method === 'GET' && url.pathname === '/api/session') return send(200, sessionView(who));
     if (req.method === 'GET' && url.pathname === '/api/state') return send(200, await state());
     if (req.method === 'POST') {
       if (req.headers['content-type']?.split(';')[0] !== 'application/json') return send(415, { error: 'JSON only.' });
       const body = await readJson(req);
-      if (url.pathname === '/api/start') return send(200, await start(body));
-      if (url.pathname === '/api/say') return send(200, await say(String(body.text ?? '')));
-      if (url.pathname === '/api/end') return send(200, await end());
-      if (url.pathname === '/api/owner') return send(200, await owner(body));
-      if (url.pathname === '/api/tts') return send(200, await speech(String(body.text ?? '').trim().slice(0, 600), body.lang === 'en' ? 'en' : 'th', String(body.voice ?? '')), 'audio/wav');
+      if (url.pathname === '/api/start') { limit(ip, 'start', 8, 10 * 60_000); return send(200, await start(body, who)); }
+      if (url.pathname === '/api/say') return send(200, await say(String(body.text ?? ''), who));
+      if (url.pathname === '/api/end') return send(200, await end(who));
+      if (url.pathname === '/api/owner') return send(200, await owner(body, who));
+      if (url.pathname === '/api/tts') {
+        // Only what the receptionist said in the visitor's own call, or a "one moment" line: the voice is O2's quota.
+        const text = String(body.text ?? '').trim().slice(0, 600), s = mine(who);
+        const said = s.call.turns.filter(t => t.who === 'ai').map(t => t.text).join(' ');
+        if (!text || !(FILLERS.includes(text) || said.includes(text))) throw new HttpError(403, 'Only the receptionist\'s own words are voiced.');
+        return send(200, await speech(text, body.lang === 'en' ? 'en' : 'th', String(body.voice ?? '')), 'audio/wav');
+      }
     }
     send(404, { error: 'Not here.' });
   } catch (e) {
@@ -282,4 +328,8 @@ const server = http.createServer(async (req, res) => {
 
 await seed(DB);
 setInterval(() => { tick().catch(() => {}); }, 5_000).unref();
+// A call left open and quiet ends by itself, so the line frees up.
+setInterval(() => {
+  if (session && !session.ended && !session.busy && Date.now() - session.lastActive > IDLE_MS) end(session.owner, 'max_duration').catch(() => {});
+}, 30_000).unref();
 server.listen(PORT, '127.0.0.1', () => console.log(`Talk to the receptionist: http://127.0.0.1:${PORT} (fictional spa, sandbox messages, ${MODELS[0].label} on this Mac)`));

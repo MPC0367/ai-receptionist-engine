@@ -277,6 +277,7 @@
           <button type="button" class="btn" id="cancelSetup" hidden>Cancel</button>
           <button type="submit" class="btn btn--primary" id="startBtn">Call the spa</button>
         </div>
+        <p class="note">A test line from O2 Design Studio, one call at a time. What you say is handled on O2's test computer and kept with the fictional spa's records; the receptionist's words are voiced by Google's Gemini. Please use made-up names and details.</p>
         <p>On a voice call you speak, it answers out loud, then listens again; it says "one moment" while it works (a reply takes a few seconds, the first one longer while the model loads). Use Safari or Chrome and allow the microphone.</p>
       </form>
     </div>
@@ -417,7 +418,7 @@ function eventHtml(e) {
 /* ---------- Conversation ---------- */
 function renderThread() {
   const t = $('#thread'), c = view?.call;
-  if (!c) { t.innerHTML = '<li class="sys">No call yet. Press “New call” to ring the spa.</li>'; return; }
+  if (!c) { t.innerHTML = view?.lineBusy ? '<li class="sys">The line is busy: someone else is talking to the receptionist. Try again in a few minutes.</li>' : '<li class="sys">No call yet. Press “New call” to ring the spa.</li>'; return; }
   const who = { new: 'a new caller', returning: '“บี”, a returning caller', withheld: 'a withheld number' }[c.caller];
   let h = `<li class="sys">Call ${c.n} · ${fmtTime(c.startedAt)} · ${esc(view.models.find(m => m.id === c.model)?.label ?? c.model)} · you are ${who}</li>`;
   h += aiHtml(c.greeting, 'runtime', null, 'greeting');
