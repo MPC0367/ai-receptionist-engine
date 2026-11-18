@@ -323,7 +323,9 @@ export class Receptionist {
   usage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, calls: 0, ms: 0 };
   events: string[] = [];
   /** Every tool call the model made, with what came back (for reading a failed run). */
-  toolLog: Array<{ name: string; input: unknown; ok: boolean; code?: string; problems?: string[] }> = [];
+  toolLog: Array<{ name: string; input: unknown; ok: boolean; code?: string; problems?: string[]; seen?: unknown }> = [];
+  /** Who wrote the last reply: the model's own words, or a fixed sentence the runtime read (a read-back, a correction). */
+  lastSource: 'model' | 'runtime' = 'runtime';
   /** The start of each reply the runtime would not read out (cut off, markup), for reading a run. */
   discarded: string[] = [];
   private lastHold: { ref: string; rendered: { th: string; en: string }; spokenTurn: number; forBooking?: string } | null = null;
@@ -391,6 +393,7 @@ export class Receptionist {
 
   /** One caller utterance in, the receptionist's spoken reply out (possibly after several tool calls). */
   async respond(callerText: string): Promise<string> {
+    this.lastSource = 'runtime';
     const em = await this.call.listen(callerText);
     if (em) { this.textOffer = null; this.events.push('emergency_rule'); this.emergencyLine = this.call.turns.at(-1)!.text; return this.emergencyLine; }
     this.messages.push({ role: 'user', content: callerText });
@@ -457,6 +460,7 @@ export class Receptionist {
         }
         const seq = this.call.say(text);
         if (asksAboutText(text)) this.textAskedTurn = seq;
+        this.lastSource = 'model';
         return text;
       }
       const results = [];
@@ -479,9 +483,10 @@ export class Receptionist {
         if ((u.name === 'search_availability' && ['unavailable_with_alternatives', 'none_found'].includes(result.data?.status)) || result.error?.code === 'CONFLICT') this.takenSeen = true;
         const write = u.name === 'create_booking' || u.name === 'reschedule_booking' || (u.name === 'cancel_booking' && input.confirmed === true);
         if (write) writeFailed = !result.ok;
-        this.toolLog.push({ name: u.name, input: given, ok: !!result.ok, ...(result.ok ? {} : { code: result.error?.code ?? result.error?.speakable_hint }) });
+        const seen = this.refs.hide(result);
+        this.toolLog.push({ name: u.name, input: given, ok: !!result.ok, ...(result.ok ? {} : { code: result.error?.code ?? result.error?.speakable_hint }), seen });
         if (say) spoken.push(say);
-        results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify(this.refs.hide(result)), ...(result.ok ? {} : { is_error: true }) });
+        results.push({ type: 'tool_result', tool_use_id: u.id, content: JSON.stringify(seen), ...(result.ok ? {} : { is_error: true }) });
       }
       this.messages.push({ role: 'user', content: results });
       if (spoken.length) {

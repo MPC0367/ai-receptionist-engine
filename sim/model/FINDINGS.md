@@ -195,3 +195,25 @@ double booking: it wrote the month as "พรรณิกายน", the runtime
 - **The caller model is weak too**: one failure (M02) was the caller going silent. A stronger fixed caller (Gemini free
   tier, Cerebras) would make results steadier.
 - None of this says how Claude would do (D-04b). The fixes above apply to every route.
+
+## 18 Nov 2026 — talking to it (sim/talk, the owner's "make it something i can talk to")
+
+The talk page (`npm run talk`, http://127.0.0.1:4520) puts a person in the caller's seat against the same runtime, with
+the real date and time, the fictional spa in its own database (`rcpt_talk`) and the sandbox transport. The first
+conversations, Gemma 4 12B, Thai, on mains power (90 W):
+
+- **A booking in three turns:** "ขอจองนวดไทย 60 นาที พรุ่งนี้บ่ายสาม" → one search, Thursday 19 Nov 15:00 offered (13.8 s
+  with the model loading, 7.8 s warm); the name → the runtime's read-back (1.5–4.3 s); "ใช่ค่ะ" → booked, the runtime
+  offered the text (12 s); "ได้ค่ะ" → text queued. Once the model set `send_confirmation_text` before the caller had
+  said yes to a text: refused (`text_without_consent`), and the runtime asked instead.
+- **The owner loop works end to end:** an unknown question (parking) went to the owner's LINE; the owner's reply came
+  back as a preview to approve; Send texted it to the caller; "save for future callers" made it an approved answer, and
+  a new Thai caller was then answered from it by `get_business_facts`.
+- **Open — the model skipped the restatement:** on "ได้ค่ะ ส่งให้หน่อย" Gemma called `record_consent` and
+  `request_owner_answer` at once, without restating the question and asking whether it is right (the prompt asks for
+  it; the runtime does not enforce it). It also said once that the question had been sent before any tool ran
+  (`relay_promise_without_tool`: asked again, then it ran the tools).
+- **Open — a learned answer is found only in its own language:** asked in English "do you have parking at the spa?",
+  `get_business_facts` returned no_answer; the answer the owner saved is found by its Thai words only (retrieval is by
+  keyword, see README limits). A saved answer needs keywords in both languages, or retrieval beyond keywords.
+- **Open — the English greeting reads the Thai name** "ร้านสปาตัวอย่าง": the seed's location has no English name.

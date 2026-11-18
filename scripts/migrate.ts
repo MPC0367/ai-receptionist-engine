@@ -9,7 +9,7 @@ import pg from 'pg';
 const ROOT = path.resolve(import.meta.dirname, '..');
 
 export async function migrate(database: string, reset: boolean) {
-  if (!['rcpt', 'rcpt_test'].includes(database)) throw new Error(`refusing to migrate unknown database ${database}`);
+  if (!['rcpt', 'rcpt_test', 'rcpt_talk'].includes(database)) throw new Error(`refusing to migrate unknown database ${database}`);
   const c = new pg.Client({ host: '127.0.0.1', port: 54421, user: 'rcpt', database });
   await c.connect();
   try {

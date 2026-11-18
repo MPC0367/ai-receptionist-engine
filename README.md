@@ -13,7 +13,7 @@ nothing here is deployed.
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 123 tests (resets the rcpt_test database per test)
+npm test              # 124 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -40,6 +40,7 @@ link script: run `node scripts/hydrate-symlinks.js` from inside `node_modules/@e
 | `sim/model/` | D-04b | Model-driven runs: the model under test is the receptionist behind the deterministic runtime, a second model plays the caller, graders check the database; `node sim/model/run.ts` (dry run unless `--yes`, hard budget cap). `free-models.ts` runs the same harness on free routes (below) |
 | `sim/fake-google.ts` | §17 | Google Calendar API v3 stand-in (shapes, 409, 410, 401, injected faults) |
 | `spikes/livekit-transfer/` | D-04, SM-9 | The screened-transfer spike on self-hosted LiveKit + SIPp: seven cases pass (12 Nov 2026). Start at its `RESULTS.md`; `PLAN.md` was the plan |
+| `sim/talk/` | D-04b | The talk page: a person plays the caller (typing, or speaking in Safari/Chrome) against the runtime and a free local model; beside the call, each tool step and what the model saw, the diary, the texts and the owner's LINE (below) |
 | `sim/` | §17 | Seed, the scripted stand-in for the voice runtime (`session.ts`), and the demo (`run.ts`) |
 | `test/` | §17 | Acceptance scenarios by AT id |
 
@@ -98,3 +99,27 @@ npm run model:run -- --provider gemini --models gemini-3.8-flash --yes    # GEMI
   route. First real model, 12–13 Nov 2026: Gemma 4 12B on this Mac, 16/16 on the fourth full run; what it found and
   what is still open is in `sim/model/FINDINGS.md`.
 
+
+## Talk to it (18 Nov 2026)
+
+```bash
+npm run db:start
+npm run talk          # http://127.0.0.1:4520 (preview entry `ai-receptionist-talk`)
+```
+
+You are the caller; the receptionist is the free model you pick on this Mac (Gemma 4 12B by default, gpt-oss 20B as
+the other) behind the same runtime the scenarios use, so every guard applies. Choose Thai or English and who is calling:
+a new caller (+66 81 234 9001), a returning caller "บี" (+66 81 234 9002) who already has a Thai massage the day after
+tomorrow at 15:00, or a withheld number. Dates are today's real ones in Bangkok. Type, or press the microphone in
+Safari or Chrome (the browser's own speech service hears you; "Read the replies aloud" uses the Mac's voices; "Keep
+listening" makes it a back-and-forth). The chips above the box are things to try.
+
+Beside the call: **What it did** (each tool the model called, with its arguments and what it saw; replies the runtime
+held back and why; which replies were the model's own words and which a fixed runtime sentence), **Diary** (the
+spa's bookings and holds), **Your texts** (what reached the caller's phone, as sandbox copies), **Owner's LINE** (the
+owner's side: questions the receptionist could not answer arrive here; reply as the owner, approve with the buttons,
+and save an answer for the next caller), **The spa** (everything it is allowed to know).
+
+Its own database `rcpt_talk` (a fresh spa each call unless you untick it), the sandbox transport, and a server that
+answers 127.0.0.1 only. Nothing reaches a phone, LINE or a calendar. What the first conversations found is at the end of
+`sim/model/FINDINGS.md`.

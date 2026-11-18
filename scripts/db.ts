@@ -1,7 +1,7 @@
 /**
  * Project-local PostgreSQL 18 for Gate A (simulation only).
  * Binaries from @embedded-postgres/darwin-arm64; data in .data/pg (git-ignored); 127.0.0.1:54421 only, no unix
- * sockets, trust auth on loopback. Databases: `rcpt` (simulation) and `rcpt_test` (tests). Deleting .data/ removes it.
+ * sockets, trust auth on loopback. Databases: `rcpt` (simulation), `rcpt_test` (tests) and `rcpt_talk` (the talk page, sim/talk). Deleting .data/ removes it.
  *
  *   node scripts/db.ts start | stop | status
  */
@@ -15,7 +15,7 @@ const DATA = path.join(ROOT, '.data', 'pg');
 const LOG = path.join(ROOT, '.data', 'pg.log');
 export const PORT = 54421;
 export const SUPERUSER = 'rcpt';
-const DATABASES = ['rcpt', 'rcpt_test'];
+const DATABASES = ['rcpt', 'rcpt_test', 'rcpt_talk'];
 
 function bin(name: string): string {
   const dir = path.join(ROOT, 'node_modules', '@embedded-postgres', `${process.platform}-${process.arch}`, 'native', 'bin');

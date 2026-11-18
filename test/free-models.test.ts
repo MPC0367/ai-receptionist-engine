@@ -120,6 +120,23 @@ test('Ollama route: books end to end with arguments as objects and a context win
   assert.ok(last.messages.filter((m: any) => m.role === 'tool').every((m: any) => !('tool_call_id' in m)));
 });
 
+test('the talk page can show what the model saw and who wrote each reply (sim/talk)', async () => {
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  brain = booker;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ ชื่ออันนา');
+  assert.equal(rec.lastSource, 'runtime', 'the read-back is the runtime\'s fixed sentence');
+  await rec.respond('ใช่ค่ะ');
+  assert.equal(rec.lastSource, 'runtime', 'so is the offer of a text');
+  await rec.respond('ขอบคุณครับ');
+  assert.equal(rec.lastSource, 'model', 'a thank-you answered in words is the model\'s own');
+  const search = rec.toolLog.find(t => t.name === 'search_availability')!, hold = rec.toolLog.find(t => t.name === 'hold_slot')!;
+  assert.equal((search.seen as any).data.options[0].slot_token, 'S1', 'the log keeps the labelled result the model saw, not the signed token');
+  assert.equal((hold.seen as any).data.hold_ref, 'H1');
+});
+
 test('a malformed tool call never reaches the gateway: the model is told what was wrong', async () => {
   const clock = await fresh();
   const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });

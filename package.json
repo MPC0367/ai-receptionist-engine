@@ -14,7 +14,8 @@
     "migrate": "node scripts/migrate.ts",
     "test": "node --test --test-concurrency=1 test/",
     "sim": "node sim/run.ts",
-    "model:run": "node --env-file-if-exists=.env.local sim/model/run.ts"
+    "model:run": "node --env-file-if-exists=.env.local sim/model/run.ts",
+    "talk": "node --env-file-if-exists=.env.local sim/talk/server.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
