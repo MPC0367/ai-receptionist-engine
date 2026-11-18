@@ -132,5 +132,20 @@ owner's side: questions the receptionist could not answer arrive here; reply as 
 and save an answer for the next caller), **The spa** (everything it is allowed to know).
 
 Its own database `rcpt_talk` (a fresh spa each call unless you untick it), the sandbox transport, and a server that
-answers 127.0.0.1 only. Nothing reaches a phone, LINE or a calendar. What the first conversations found is at the end of
+answers 127.0.0.1 only.
+
+**Sharing it (18 Nov 2026, the owner's "make the visual part where i can talk to the receptionist live"):** with
+`TALK_PUBLIC=1` (set in the preview entry) the server also answers a Cloudflare quick tunnel, which gives this Mac's
+page a public https address with no account or DNS change:
+
+```bash
+caffeinate -i cloudflared tunnel --no-autoupdate --config <an empty file> --url http://127.0.0.1:4520
+```
+
+The address (`https://<words>.trycloudflare.com`) is new each time the tunnel starts, and it works only while this Mac
+is awake with the talk server, Ollama and the tunnel running. One call at a time: the visitor who starts a call owns it
+(a cookie); others hear the line is busy until it ends or has been quiet for 4 minutes. Only the caller acts as the
+owner for their call; Gemini voices only the receptionist's own lines; requests are rate-limited per visitor; the page
+is `noindex` and cannot be framed. A stable address (e.g. under o2-designstudio.com) would be a named tunnel and a DNS
+record in O2's Cloudflare account. Nothing reaches a phone, LINE or a calendar. What the first conversations found is at the end of
 `sim/model/FINDINGS.md`.
