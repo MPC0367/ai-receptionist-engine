@@ -34,15 +34,47 @@ const BUSINESS = 'ร้านสปาตัวอย่าง (Sample Day Spa)
  * "increase the speed of the processor"), so it comes first when there is a key; Gemma and gpt-oss run on this Mac.
  */
 const ALL_MODELS = [
+  // Groq (the owner's choice, 18–20 Nov 2026, for steadily fast replies): ~0.5 s a request, but its free tier allows 8,000
+  // tokens a minute per model (~3 receptionist requests), so "Fast" moves on to the next model the moment one is at its
+  // limit: gpt-oss 120B, then 20B (its own allowance), then Gemini Flash-Lite.
+  { id: 'fast', provider: 'chain' as const, label: 'Fast (Groq, with fallbacks)', note: 'about half a second a reply; moves to the next model if one is busy (the words go to Groq or Google)' },
+  { id: 'openai/gpt-oss-120b', provider: 'groq' as const, label: 'gpt-oss 120B on Groq', note: 'fast: a fraction of a second a reply (Groq free tier; the words go to Groq)' },
+  { id: 'openai/gpt-oss-20b', provider: 'groq' as const, label: 'gpt-oss 20B on Groq', note: 'fastest, smaller (Groq free tier; the words go to Groq)' },
   { id: 'gemini-3.5-flash-lite', provider: 'gemini' as const, label: 'Gemini 3.5 Flash-Lite', note: 'fast: about a second a reply (free tier; the words go to Google)' },
   { id: 'gemma4:12b', provider: 'ollama' as const, label: 'Gemma 4 12B', note: 'on this Mac: 16 of 16 scenarios, 4 to 15 seconds a reply' },
   { id: 'gpt-oss:20b', provider: 'ollama' as const, label: 'gpt-oss 20B', note: 'on this Mac: 14 of 16 scenarios, slower' },
 ];
-const MODELS = ALL_MODELS.filter(m => m.provider !== 'gemini' || process.env.GEMINI_API_KEY);
+const MODELS = ALL_MODELS.filter(m => m.provider === 'ollama' || (m.provider === 'gemini' && process.env.GEMINI_API_KEY) || ((m.provider === 'groq' || m.provider === 'chain') && process.env.GROQ_API_KEY));
 /** Fictional caller numbers (INV-12). */
 const CALLERS = { new: '+66812349001', returning: '+66812349002' } as const;
-const clients = { ollama: new CompatClient({ provider: 'ollama' }), gemini: new CompatClient({ provider: 'gemini', minIntervalMs: 0 }) };
-const clientFor = (model: string) => clients[ALL_MODELS.find(m => m.id === model)?.provider ?? 'ollama'];
+const clients = { ollama: new CompatClient({ provider: 'ollama' }), gemini: new CompatClient({ provider: 'gemini', minIntervalMs: 0 }), groq: new CompatClient({ provider: 'groq', minIntervalMs: 0 }) };
+/** Fail-fast clients for the chain: a model at its limit is skipped at once rather than waited for. */
+const quick = { groq: new CompatClient({ provider: 'groq', minIntervalMs: 0, maxRetries: 0 }), gemini: new CompatClient({ provider: 'gemini', minIntervalMs: 0, maxRetries: 1 }) };
+const CHAIN = [
+  { client: quick.groq, model: 'openai/gpt-oss-120b' }, { client: quick.groq, model: 'openai/gpt-oss-20b' }, { client: quick.gemini, model: 'gemini-3.5-flash-lite' },
+];
+const chainRest = new Map<string, number>();
+/** "Fast": the first model in CHAIN that is not resting answers; a refusal for rate or load rests it for a minute. */
+const fastChain = {
+  messages: {
+    create: async (p: any) => {
+      let last: unknown;
+      for (const step of CHAIN) {
+        if ((chainRest.get(step.model) ?? 0) > Date.now()) continue;
+        if (step.client === quick.gemini && !process.env.GEMINI_API_KEY) continue;
+        try { return await step.client.messages.create({ ...p, model: step.model }); }
+        catch (e) {
+          last = e;
+          if (!/rate|quota|429|5\d\d|busy|demand|timeout|abort/i.test(String((e as Error).message))) throw e;
+          // A day's allowance gone (Groq: "tokens per day") rests the model for half an hour, a minute's for a minute.
+          chainRest.set(step.model, Date.now() + (/per day|TPD|RPD/i.test(String((e as Error).message)) ? 30 * 60_000 : 60_000));
+        }
+      }
+      throw last ?? new Error('every model is busy: try again in a minute');
+    },
+  },
+};
+const clientFor = (model: string): any => { const p = ALL_MODELS.find(m => m.id === model)?.provider ?? 'ollama'; return p === 'chain' ? fastChain : clients[p]; };
 
 /**
  * The receptionist's voice: Gemini's speech models, as in O2's video voice-overs (the owner, 18 Nov 2026: "make it sound
@@ -184,7 +216,7 @@ async function start(o: { lang?: string; model?: string; caller?: string; fresh?
   const model = MODELS.some(m => m.id === o.model) ? o.model! : MODELS[0].id;
   const caller = ['new', 'returning', 'withheld'].includes(o.caller ?? '') ? o.caller! : 'new';
   const client = clientFor(model);
-  const problems = await client.preflight([model]);
+  const problems = client === fastChain ? [] : await client.preflight([model]);
   if (problems.length) throw new HttpError(503, problems.join(' '));
   if (session && !session.ended) await end(session.owner);
   if (ALL_MODELS.find(m => m.id === model)?.provider === 'ollama') void warm(model);

@@ -682,10 +682,13 @@ function speakThen(text, l, done, onStart) {
 /** The Mac's voice: in pieces (one long utterance can stall), with a guard if a browser never says it ended. */
 const THAI_HOURS = { 6: 'หกโมงเช้า', 7: 'เจ็ดโมงเช้า', 8: 'แปดโมงเช้า', 9: 'เก้าโมงเช้า', 10: 'สิบโมงเช้า', 11: 'สิบเอ็ดโมง', 12: 'เที่ยง', 13: 'บ่ายโมง', 14: 'บ่ายสอง', 15: 'บ่ายสาม', 16: 'บ่ายสี่', 17: 'ห้าโมงเย็น', 18: 'หกโมงเย็น', 19: 'หนึ่งทุ่ม', 20: 'สองทุ่ม', 21: 'สามทุ่ม' };
 /** What is said aloud for a written line (the server does the same for Gemini's voice): no year, times as people say them. */
+const tt = (h, m) => { const b = THAI_HOURS[h]; return !b || m > 59 ? undefined : m === 0 ? b : m === 30 ? `${b}ครึ่ง` : `${b} ${m} นาที`; };
 function spoken(text, l) {
   let t = text;
   if (l === 'th') t = t.replace(/(?:เวลา\s*)?\d{1,2}[:.]\d{2}\s*น\.?\s*\(([^)]+)\)/g, 'เวลา$1').replace(/\s(25|20)\d{2}(?=\s|$)/g, '')
-    .replace(/(\d{1,2})[:.](\d{2})\s*น\.?/g, (all, h, m) => { const b = THAI_HOURS[+h]; return !b ? all : +m === 0 ? b : +m === 30 ? `${b}ครึ่ง` : `${b} ${+m} นาที`; });
+    .replace(/(\d{1,2})[:.](\d{2})\s*น\.?/g, (all, h, m) => tt(+h, +m) ?? all)
+    .replace(/(\d{1,2}):(\d{2})\s*[–-]\s*(\d{1,2}):(\d{2})/g, (all, a, b, c, d) => { const x = tt(+a, +b), y = tt(+c, +d); return x && y ? `${x}ถึง${y}` : all; })
+    .replace(/(\d{1,2}):(\d{2})/g, (all, h, m) => tt(+h, +m) ?? all);
   else t = t.replace(/\b(\d{1,2}):00\s*([AP]M)\b/gi, '$1 $2').replace(/\s20\d{2}\b/g, '');
   return t.replace(/\(([^)]*)\)/g, '$1').replace(/:\s/g, ' ').replace(/[?？]+/g, '').replace(/\s{2,}/g, ' ').trim();
 }

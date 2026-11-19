@@ -218,7 +218,7 @@ export function asksAboutText(t: string): boolean {
 
 /** The caller's answer to it: a refusal wins over any yes in the same turn ("ใช่ค่ะ จองเลย ไม่ต้องส่งข้อความนะคะ"). */
 export function yesNo(t: string): 'yes' | 'no' | null {
-  if (/ไม่ต้อง|ไม่เอา|ไม่ใช่|ไม่รับ|ไม่สะดวก|ไม่ค่ะ|ไม่ครับ|^\s*ไม่|\b(no|nope|don'?t|do not|not needed|no need|no thanks)\b/i.test(t)) return 'no';
+  if (/ไม่ต้อง|ไม่เอา|ไม่ใช่|ไม่รับ|ไม่สะดวก|ไม่อยาก|ไม่ต้องการ|ไม่จำเป็น|ไม่ขอ|ไม่ค่ะ|ไม่ครับ|^\s*ไม่|\b(no|nope|don'?t|do not|not needed|no need|no thanks)\b/i.test(t)) return 'no';
   // Thai has no spaces, and substrings mislead ("ขอบคุณครับ" contains "รับ"), so the yes words are whole words.
   const words = [...THAI_WORDS.segment(t)].filter(s => s.isWordLike).map(s => s.segment.toLowerCase());
   const particles = new Set(['ค่ะ', 'คะ', 'ครับ', 'ค่า', 'จ้ะ', 'จ้า', 'นะ', 'คับ']);
@@ -231,9 +231,19 @@ const YES_WORDS = new Set(['ใช่', 'ได้', 'โอเค', 'ตกล�
 
 /** The caller asking for a text unprompted ("รับข้อความยืนยันได้เลยค่ะ", "please text me the details"): consent in their words. */
 export function volunteersText(t: string): boolean {
-  if (/ไม่(ต้อง|เอา|รับ|ส่ง)\S{0,10}ข้อความ|\b(no|don'?t|do not)\b[^.?!]{0,15}\btext/i.test(t)) return false;
+  if (declinesText(t)) return false;
   return /(รับ|ส่ง|ขอ|อยากได้|อยากรับ)\S{0,8}ข้อความ|ข้อความ\S{0,12}(ด้วย|ได้เลย|มาด้วย|มาเลย)/.test(t) ||
     /\b(text me|send me a text|send (me )?(a |the )?(text|confirmation text)|i'?d like a text|please text)\b/i.test(t);
+}
+
+/**
+ * The caller saying no to a text in their own words ("ไม่อยากได้ข้อความยืนยันนะคะ", "no need for a text"). It always wins:
+ * gpt-oss-20b's caller said "ไม่อยากได้ข้อความยืนยัน" and the runtime read "อยากได้ข้อความ" as a request and sent one
+ * (20 Nov 2026).
+ */
+export function declinesText(t: string): boolean {
+  return /ไม่(ต้อง|อยาก|ต้องการ|ขอ|เอา|รับ|ส่ง|จำเป็น|ใช้)\S{0,14}ข้อความ|ข้อความ\S{0,12}ไม่(ต้อง|เอา|จำเป็น)/.test(t) ||
+    /\b(no|don'?t|do not)\b[^.?!]{0,20}\b(text|sms|message)/i.test(t) || /\b(no need for|without) (a |the )?(text|sms|message)\b/i.test(t);
 }
 
 /** "I'll text you a confirmation" / "จะส่งข้อความยืนยันไปที่เบอร์นี้" outside offers and refusals. */
@@ -279,7 +289,7 @@ The caller already heard the greeting with the AI disclosure. Speak like a calm,
 
 Rules (the runtime enforces them; breaking one discards your reply):
 - Never state a fact, price, time, duration, address or policy unless it came from a tool result in this call or from the caller. Numbers you write are checked against tool results.
-- Bookings: identify the service with the caller, then call search_availability with the caller's own words for the day and the time in date_phrase, both of them (${lang === 'th' ? '"พรุ่งนี้บ่ายสาม", not "บ่ายสาม"' : '"tomorrow at 4pm", not "4pm"'}; do not convert them). If it returns needs_clarification, ask that question. Offer at most three times, reading the start_local text exactly. When the caller picks one, call hold_slot with that slot_token and the name the caller gave (if they have not said it, ask: a greeting is not a name). The runtime then reads the exact confirmation sentence aloud itself — do not repeat or paraphrase it. Only after the caller clearly says yes, call create_booking. A confirmation text goes only if you asked whether they want one and the caller said yes; then set send_confirmation_text true. Never say a text is coming unless the tool result says it was sent.
+- Bookings: identify the service with the caller, then call search_availability with the caller's own words for the day and the time in date_phrase, both of them (${lang === 'th' ? '"พรุ่งนี้บ่ายสาม", not "บ่ายสาม"' : '"tomorrow at 4pm", not "4pm"'}; do not convert them). If it returns needs_clarification, ask that question. Offer at most three times, reading the start_local text exactly. If the search finds the very time the caller asked for (exact_available) and you know their name, call hold_slot straight away: the runtime's read-back is the one "shall I book it?" question, so never ask it yourself first. When the caller picks one, call hold_slot with that slot_token and the name the caller gave (if they have not said it, ask: a greeting is not a name). The runtime then reads the exact confirmation sentence aloud itself — do not repeat or paraphrase it. Only after the caller clearly says yes, call create_booking. A confirmation text goes only if you asked whether they want one and the caller said yes; then set send_confirmation_text true. Never say a text is coming unless the tool result says it was sent.
 - If a time is taken (CONFLICT), say so briefly and offer the alternatives the tools give.
 - A NOT_FOUND or AMBIGUOUS error names what was not found and gives the menu: it never means there are no free times.
   Only search_availability's own result says whether a time is free.
@@ -627,7 +637,10 @@ export class Receptionist {
 
   /** The caller's own request for a text in this call, if any (the latest turn that asks for one). */
   private volunteered(): number | undefined {
-    return [...this.call.turns].reverse().find(t => t.who === 'caller' && volunteersText(t.text))?.seq;
+    const turns = this.call.turns.filter(t => t.who === 'caller');
+    // A refusal said after the request (or in the same breath) settles it: no text.
+    for (const t of [...turns].reverse()) { if (declinesText(t.text)) { this.textDeclined = true; return undefined; } if (volunteersText(t.text)) return t.seq; }
+    return undefined;
   }
 
   /** The caller's answer to the runtime's text offer: yes sends it, no settles it, anything else goes to the model. */
@@ -711,7 +724,7 @@ export class Receptionist {
       const answer = this.call.turns.find(t => t.who === 'caller' && t.seq > rb.spokenTurn);
       if (!answer) return { ok: false, why: 'the runtime has just read the question back: wait for the caller to answer it' };
       const t = answer.text;
-      const textNo = /(ไม่ต้อง|ไม่)\S{0,6}?(ส่ง|รับ)\S{0,10}?ข้อความ|\b(no|don'?t|do not)\b[^.?!]{0,20}\b(text|message|sms)\b/i.test(t);
+      const textNo = declinesText(t);
       const verdict = answersReadBack(t);
       if (!textNo && verdict === 'yes') return { ok: true, turn: answer.seq, text: rb.text };
       this.questionRead = null;

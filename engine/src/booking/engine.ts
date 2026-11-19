@@ -89,7 +89,7 @@ export async function bookingSummary(tx: Tx, appointmentId: string): Promise<{ t
 }
 
 // Availability ------------------------------------------------------------------------------------------
-export type SlotOption = { slot_token: string; staff_id: string; staff_name: string; start_utc: string; start_local_th: string; start_local_en: string };
+export type SlotOption = { slot_token: string; staff_id: string; staff_name: string; staff_name_en: string; start_utc: string; start_local_th: string; start_local_en: string };
 
 async function busy(tx: Tx, staffIds: string[], from: Date, to: Date, now: Date) {
   const r = await tx.query(
@@ -102,10 +102,10 @@ async function busy(tx: Tx, staffIds: string[], from: Date, to: Date, now: Date)
 
 export async function qualifiedStaff(tx: Tx, variantId: string, staffId?: string) {
   const r = await tx.query(
-    `select r.id, r.display_name from resources r join resource_services rs on rs.resource_id = r.id
+    `select r.id, r.display_name, r.name_en from resources r join resource_services rs on rs.resource_id = r.id
      where rs.variant_id = $1 and r.kind = 'staff' and r.active ${staffId ? 'and r.id = $2' : ''} order by r.display_name`,
     staffId ? [variantId, staffId] : [variantId]);
-  return r.rows as Array<{ id: string; display_name: string }>;
+  return r.rows as Array<{ id: string; display_name: string; name_en: string | null }>;
 }
 
 /**
@@ -113,9 +113,9 @@ export async function qualifiedStaff(tx: Tx, variantId: string, staffId?: string
  * `exclude` lets a reschedule ignore the booking's own claims.
  */
 export async function availableOn(tx: Tx, args: {
-  variant: Variant; date: LocalDate; staff: Array<{ id: string; display_name: string }>; window?: Window; exact?: LocalTime;
+  variant: Variant; date: LocalDate; staff: Array<{ id: string; display_name: string; name_en?: string | null }>; window?: Window; exact?: LocalTime;
   now: Date; tz: string; pol: Policy; excludeAppointment?: string;
-}): Promise<Array<{ staff_id: string; staff_name: string; startMs: number; t: LocalTime }>> {
+}): Promise<Array<{ staff_id: string; staff_name: string; staff_name_en?: string; startMs: number; t: LocalTime }>> {
   const { variant: v, date, now, tz, pol } = args;
   const today = localParts(now.getTime(), tz);
   const horizonEnd = addDays({ y: today.y, m: today.m, d: today.d }, pol.horizon_days);
@@ -129,7 +129,7 @@ export async function availableOn(tx: Tx, args: {
     const ownKeys = new Set(own.rows.map(x => `${x.resource_id}:${(x.s as Date).getTime()}`));
     claims = claims.filter(c => !ownKeys.has(`${c.id}:${c.s}`));
   }
-  const out: Array<{ staff_id: string; staff_name: string; startMs: number; t: LocalTime }> = [];
+  const out: Array<{ staff_id: string; staff_name: string; staff_name_en?: string; startMs: number; t: LocalTime }> = [];
   for (const s of args.staff) {
     for (const w of await hoursOn(tx, date, s.id)) {
       for (let m = minutes(w.from); m + v.duration_min <= minutes(w.to); m += pol.slot_step_min) {
@@ -142,19 +142,20 @@ export async function availableOn(tx: Tx, args: {
         if (start < now.getTime() + pol.lead_min * 60_000) continue;
         const cs = start - v.buffer_before_min * 60_000, ce = start + (v.duration_min + v.buffer_after_min) * 60_000;
         if (claims.some(c => c.id === s.id && c.s < ce && cs < c.e)) continue;
-        out.push({ staff_id: s.id, staff_name: s.display_name, startMs: start, t });
+        out.push({ staff_id: s.id, staff_name: s.display_name, staff_name_en: s.name_en ?? s.display_name, startMs: start, t });
       }
     }
   }
   return out.sort((a, b) => a.startMs - b.startMs || a.staff_name.localeCompare(b.staff_name));
 }
 
-export function toOption(tenantId: string, v: Variant, o: { staff_id: string; staff_name: string; startMs: number; t: LocalTime }, date: LocalDate, now: Date): SlotOption {
+export function toOption(tenantId: string, v: Variant, o: { staff_id: string; staff_name: string; staff_name_en?: string; startMs: number; t: LocalTime }, date: LocalDate, now: Date): SlotOption {
   const st = o.startMs - v.buffer_before_min * 60_000;
   const en = o.startMs + (v.duration_min + v.buffer_after_min) * 60_000;
   return {
     slot_token: signSlot({ t: tenantId, v: v.id, s: o.staff_id, st, en, iat: now.getTime() }),
-    staff_id: o.staff_id, staff_name: o.staff_name, start_utc: new Date(o.startMs).toISOString(),
+    // The English name too, so an English call does not say "นก" (gpt-oss on Groq did, 20 Nov 2026).
+    staff_id: o.staff_id, staff_name: o.staff_name, staff_name_en: o.staff_name_en ?? o.staff_name, start_utc: new Date(o.startMs).toISOString(),
     start_local_th: renderDateTime(date, o.t, 'th'), start_local_en: renderDateTime(date, o.t, 'en'),
   };
 }

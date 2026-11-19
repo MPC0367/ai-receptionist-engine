@@ -13,7 +13,10 @@ export function thaiTime(h: number, m: number) {
 export function spoken(text: string, lang: 'th' | 'en') {
   let t = text;
   if (lang === 'th') t = t.replace(/(?:เวลา\s*)?\d{1,2}[:.]\d{2}\s*น\.?\s*\(([^)]+)\)/g, 'เวลา$1').replace(/\s(25|20)\d{2}(?=\s|$)/g, '')
-    .replace(/(\d{1,2})[:.](\d{2})\s*น\.?/g, (all, h, m) => thaiTime(Number(h), Number(m)) ?? all);
+    .replace(/(\d{1,2})[:.](\d{2})\s*น\.?/g, (all, h, m) => thaiTime(Number(h), Number(m)) ?? all)
+    // Bare clock times and ranges too ("10:00–20:00" from the business hours): a colon only, so a date or price stays.
+    .replace(/(\d{1,2}):(\d{2})\s*[–-]\s*(\d{1,2}):(\d{2})/g, (all, a, b, c, d) => { const x = thaiTime(+a, +b), y = thaiTime(+c, +d); return x && y ? `${x}ถึง${y}` : all; })
+    .replace(/(\d{1,2}):(\d{2})/g, (all, h, m) => thaiTime(Number(h), Number(m)) ?? all);
   else t = t.replace(/\b(\d{1,2}):00\s*([AP]M)\b/gi, '$1 $2').replace(/\s20\d{2}\b/g, '');
   return t.replace(/\(([^)]*)\)/g, '$1').replace(/:\s/g, ' ').replace(/[?？]+/g, '').replace(/\s{2,}/g, ' ').trim();
 }

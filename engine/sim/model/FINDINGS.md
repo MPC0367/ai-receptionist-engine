@@ -263,3 +263,27 @@ increase the speed of the processor … i dont have to click send every time".
   heard after about a second of quiet, final or not (Safari rarely marks speech final, so words sat in the box).
 - **Open:** the free tier's speed. Consistently fast replies need a faster host (Groq's free tier, an account) or a paid
   Gemini key (a fraction of a cent a turn): the owner's choice.
+
+## 20 Nov 2026 — Groq (the owner's "Groq free account"), and a consent bug it found
+
+- **Speed:** gpt-oss 120B, gpt-oss 20B and Qwen 3.8 27B on Groq answer a receptionist request in 0.5–0.7 s (Gemini's free
+  tier the same night: 5–9 s; Gemma on this Mac 4–15 s). **Limits** (free tier, per model): 8,000 tokens a minute,
+  1,000 requests and 200,000 tokens a day; a request is about 2,100 tokens, so roughly three a minute and ~90 a day.
+  The talk page's default "Fast" chains gpt-oss 120B → 20B → Gemini Flash-Lite and skips a model at its limit (a
+  minute, or half an hour when the day is used up) instead of waiting.
+- **Groq refuses a whole reply** when a tool argument does not match the schema on its side (a `null` in an optional
+  field, `tool_use_failed`): `free-models.ts` now hands the refused call (`failed_generation`) to the runtime, which
+  checks arguments itself. **Gemini 3 needs every tool call in the conversation signed**: calls another model made
+  carry Google's documented `skip_thought_signature_validator`; Groq never gets Google's field.
+- **Scenarios:** booking (M01, M02, M08) 6/6 on gpt-oss 120B on the final prompt; M03–M07 passed on 120B before the last
+  prompt change and again on gpt-oss 20B after it; a clean 16/16 on 120B was cut short by its daily tokens. Two
+  failures were the stand-in callers (Gemini, then Qwen) hanging up on the read-back: the harness now reminds a caller
+  once to answer a direct question, and M02/M08's scripts answer the read-back.
+- **Fixed — one booking question, not two:** gpt-oss asked "อยากจองเลยไหมคะ?" and then the runtime read back "ยืนยันจองเลย
+  ไหมคะ". When the search finds the very time asked for and the name is known, the model now holds at once, and the
+  read-back is the only question (one turn fewer).
+- **Fixed — a text the caller refused was sent:** "ไม่อยากได้ข้อความยืนยันนะคะ" was read as a request ("อยากได้ข้อความ").
+  `declinesText` (ไม่อยาก/ไม่ต้องการ/ไม่จำเป็น/ไม่ขอ…, "no need for a text") now always wins: no text is sent or offered.
+- **Fixed — English calls said "นก":** free times carry `staff_name_en`.
+- **Open:** a name read as "บีนะ" from "บีนะคะ" (Thai word breaking; "ชนะ" shows why "นะ" cannot simply be cut); the
+  live link's address changes whenever the quick tunnel restarts (it was dropped overnight: "Tunnel not found").

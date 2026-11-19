@@ -17,6 +17,7 @@ test('spoken: times as people say them, no year, no brackets or symbols', () => 
   assert.equal(spoken('ว่างตอน 15:00 น. และ 19:30 น. ค่ะ จองไหมคะ?', 'th'), 'ว่างตอน บ่ายสาม และ หนึ่งทุ่มครึ่ง ค่ะ จองไหมคะ');
   assert.equal(spoken('To confirm: Thai massage with Nok on Thursday 19 November 2026 at 3:00 PM. Shall I book it?', 'en'),
     'To confirm Thai massage with Nok on Thursday 19 November at 3 PM. Shall I book it');
+  assert.equal(spoken('ร้านเปิดจันทร์ 10:00–20:00 ค่ะ ราคา 1,500.00 บาท วันที่ 13.11', 'th'), 'ร้านเปิดจันทร์ สิบโมงเช้าถึงสองทุ่ม ค่ะ ราคา 1,500.00 บาท วันที่ 13.11');
   assert.equal(thaiTime(10, 0), 'สิบโมงเช้า'); assert.equal(thaiTime(12, 30), 'เที่ยงครึ่ง'); assert.equal(thaiTime(16, 15), 'บ่ายสี่ 15 นาที');
   assert.equal(thaiTime(3, 0), undefined, 'outside opening hours the digits stay');
 });

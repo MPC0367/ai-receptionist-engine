@@ -37,7 +37,7 @@ export function scenarios(A: string): Scenario[] {
           [await textsTo(A, '+66812340001') === (agreedToText(call) ? 1 : 0), 'a confirmation text exactly when the caller agreed to one']]);
       } },
     { id: 'M02-ambiguous-clock', lang: 'th', ani: '+66812340002',
-      persona: 'คุณชื่อ "ต้น" ขอจองนวดเท้าพรุ่งนี้ "สามโมง" (ไม่บอกว่าเช้าหรือบ่าย) ถ้าถูกถามให้ตอบว่าบ่ายสาม ตกลงเวลาที่เสนอ แล้ววางสาย',
+      persona: 'คุณชื่อ "ต้น" ขอจองนวดเท้าพรุ่งนี้ "สามโมง" (ไม่บอกว่าเช้าหรือบ่าย) ถ้าถูกถามให้ตอบว่าบ่ายสาม ตกลงเวลาที่เสนอ เมื่อพนักงานทวนรายละเอียดการจองให้ตอบยืนยัน แล้วจึงวางสาย',
       grade: async (call) => {
         const ap = await q(A, `select starts_at from appointments where created_by_conversation = $1`, [call.conversationId]);
         // The day as well as the hour (found 16 Nov 2026: gpt-oss-20b dropped "พรุ่งนี้" and booked today at 15:00, which
@@ -74,7 +74,7 @@ export function scenarios(A: string): Scenario[] {
           [await textsTo(A, '+66812340007') === 0, 'no text: the caller did not want one']]);
       } },
     { id: 'M08-english-book', lang: 'en', ani: '+66812340008',
-      persona: 'Your name is Sam. Book a 60-minute Thai massage for tomorrow afternoon around 4pm. Accept the first time offered. No text confirmation. Then hang up.',
+      persona: 'Your name is Sam. Book a 60-minute Thai massage for tomorrow afternoon around 4pm. Accept the first time offered. When the receptionist reads the booking back, say yes. No text confirmation. Then hang up.',
       grade: async (call) => {
         const ap = await q(A, `select starts_at from appointments where created_by_conversation = $1`, [call.conversationId]);
         return check([[ap.length === 1, 'exactly one booking'], [ap.length === 1 && bangkokDay(ap[0].starts_at) === '2026-11-13', 'booked tomorrow (Fri 13 Nov)'],

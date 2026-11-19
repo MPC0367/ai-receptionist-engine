@@ -12,8 +12,10 @@
  */
 import type { ModelClient } from './receptionist.ts';
 
-export type Provider = 'ollama' | 'cerebras' | 'gemini' | 'openai-compatible';
-type Preset = { transport: 'ollama' | 'openai'; baseURL: string; keyEnv?: string; reasoning: boolean; stripAdditional: boolean; minIntervalMs: number; maxTokensTotal: number };
+export type Provider = 'ollama' | 'cerebras' | 'gemini' | 'groq' | 'openai-compatible';
+type Preset = { transport: 'ollama' | 'openai'; baseURL: string; keyEnv?: string; reasoning: boolean; stripAdditional: boolean; minIntervalMs: number; maxTokensTotal: number;
+  /** Gemini 3 wants every tool call in the conversation signed; calls another model made carry Google's documented skip value. */
+  signsToolCalls?: boolean };
 
 export const PROVIDERS: Record<Provider, Preset> = {
   // Nothing leaves the Mac. Models must be pulled first (`ollama pull <model>`: a download, the owner's yes).
@@ -23,7 +25,10 @@ export const PROVIDERS: Record<Provider, Preset> = {
   // Free tier: prompts are used to improve Google's products, so fictional data only (it is). Limits are shown only in
   // AI Studio; 10 a minute is a cautious guess. Whether it accepts additionalProperties is undocumented: it is
   // removed and enforced by `checkArgs` instead.
-  gemini: { transport: 'openai', baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai', keyEnv: 'GEMINI_API_KEY', reasoning: true, stripAdditional: true, minIntervalMs: 6_000, maxTokensTotal: Infinity },
+  gemini: { transport: 'openai', baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai', keyEnv: 'GEMINI_API_KEY', reasoning: true, stripAdditional: true, minIntervalMs: 6_000, maxTokensTotal: Infinity, signsToolCalls: true },
+  // Free tier with an account (the owner chose it, 18 Nov 2026, for steadily fast replies on the talk page): open models
+  // on Groq's own chips, about 30 requests a minute. reasoning_effort is for the gpt-oss models.
+  groq: { transport: 'openai', baseURL: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY', reasoning: true, stripAdditional: false, minIntervalMs: 2_000, maxTokensTotal: Infinity },
   'openai-compatible': { transport: 'openai', baseURL: '', keyEnv: 'OPENAI_COMPATIBLE_API_KEY', reasoning: false, stripAdditional: false, minIntervalMs: 0, maxTokensTotal: Infinity },
 };
 
@@ -37,7 +42,7 @@ export type CompatOptions = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-export type CompatStats = { requests: number; retries: number; unparseableArgs: number; toolCallsAsText: number; tokens: number; hiddenThinking?: number };
+export type CompatStats = { requests: number; retries: number; unparseableArgs: number; toolCallsAsText: number; tokens: number; hiddenThinking?: number; toolUseFailed?: number };
 
 /** Raised when the provider keeps refusing for rate or quota reasons: the runner stops and keeps what finished. */
 export class QuotaError extends Error {}
@@ -58,14 +63,14 @@ function schemaFor(schema: any, strip: boolean): any {
 }
 
 /** Anthropic-shaped request → OpenAI chat-completions body. */
-export function toOpenAI(p: any, preset: Pick<Preset, 'reasoning' | 'stripAdditional'>, temperature?: number) {
+export function toOpenAI(p: any, preset: Pick<Preset, 'reasoning' | 'stripAdditional' | 'signsToolCalls'>, temperature?: number) {
   const messages: any[] = [];
   if (p.system) messages.push({ role: 'system', content: typeof p.system === 'string' ? p.system : textOf(p.system) });
   for (const m of p.messages) {
     const blocks = blocksOf(m.content);
     if (m.role === 'assistant') {
       const calls = blocks.filter(b => b.type === 'tool_use').map(b => ({ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
-        ...(b.extra_content ? { extra_content: b.extra_content } : {}) }));
+        ...(preset.signsToolCalls ? { extra_content: b.extra_content ?? { google: { thought_signature: 'skip_thought_signature_validator' } } } : {}) }));
       messages.push(calls.length ? { role: 'assistant', content: textOf(blocks) || null, tool_calls: calls } : { role: 'assistant', content: textOf(blocks) });
     } else {
       for (const b of blocks.filter(x => x.type === 'tool_result')) messages.push({ role: 'tool', tool_call_id: b.tool_use_id, content: toolResultText(b.content) });
@@ -131,6 +136,18 @@ function cleanText(s: unknown, stats: CompatStats) {
 
 let seq = 0;
 const newId = () => `call_${Date.now().toString(36)}_${(++seq).toString(36)}`;
+
+/** A tool call the host refused (Groq's failed_generation) as an Anthropic-shaped message; nothing usable → an empty one. */
+export function salvage(raw: string) {
+  const empty = { content: [] as any[], stop_reason: 'end_turn', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } };
+  try {
+    const gen = JSON.parse(raw)?.error?.failed_generation;
+    const parsed = typeof gen === 'string' ? JSON.parse(gen) : gen;
+    const calls = (Array.isArray(parsed) ? parsed : [parsed]).filter((c: any) => c && typeof c.name === 'string');
+    if (!calls.length) return empty;
+    return { ...empty, stop_reason: 'tool_use', content: calls.map((c: any) => ({ type: 'tool_use', id: newId(), name: c.name, input: c.arguments ?? c.parameters ?? {} })) };
+  } catch { return empty; }
+}
 
 /** OpenAI chat-completions response → Anthropic-shaped message. */
 export function fromOpenAI(r: any, stats: CompatStats) {
@@ -241,7 +258,15 @@ export class CompatClient implements ModelClient {
         this.stats.tokens += out.usage.input_tokens + out.usage.cache_read_input_tokens + out.usage.output_tokens;
         return out;
       }
-      const detail = (await res.text().catch(() => '')).slice(0, 300);
+      const raw = await res.text().catch(() => '');
+      const detail = raw.slice(0, 300);
+      // Groq checks tool arguments on its side and refuses the whole reply over a null in an optional field
+      // (tool_use_failed, 20 Nov 2026); the call it refused comes back as failed_generation. Hand that to the runtime,
+      // which checks arguments itself, or an empty reply it will ask again for.
+      if (res.status === 400 && /tool_use_failed/.test(raw)) {
+        this.stats.toolUseFailed = (this.stats.toolUseFailed ?? 0) + 1;
+        return salvage(raw);
+      }
       const retryable = res.status === 429 || res.status >= 500;
       if (!retryable) throw new Error(`${this.o.provider} ${res.status}: ${detail}`);
       if (attempt >= max) throw res.status === 429 ? new QuotaError(`${this.o.provider}: still rate-limited after ${attempt + 1} tries (${detail})`) : new Error(`${this.o.provider} ${res.status} after ${attempt + 1} tries: ${detail}`);

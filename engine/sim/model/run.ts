@@ -51,10 +51,21 @@ export async function runOne(client: ModelClient, callerClient: ModelClient, sc:
   const rec = new Receptionist(client, call, model, 'ร้านสปาตัวอย่าง (Sample Day Spa)');
   const callerUsage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, calls: 0, ms: 0 };
   const callerMsgs: Array<{ role: 'user' | 'assistant'; content: string }> = [{ role: 'user', content: call.turns[0].text }];
+  let reminded = false;
   for (let turn = 0; turn < 12; turn++) {
     const r = await callerClient.messages.create({ model: callerModel, max_tokens: 400, system: callerSystem(sc.persona, sc.lang), messages: callerMsgs, output_config: { effort: 'low' } });
     callerUsage.calls++; callerUsage.input += r.usage?.input_tokens ?? 0; callerUsage.output += r.usage?.output_tokens ?? 0; callerUsage.cacheRead += r.usage?.cache_read_input_tokens ?? 0;
-    const out = r.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ');
+    let out = r.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ');
+    // A stand-in caller that hangs up on a direct question ends the test, not the receptionist's work (Gemini and Qwen
+    // both hung up on the read-back, 18–20 Nov 2026): it is reminded once to answer first.
+    const lastAi = call.turns.at(-1)?.who === 'ai' ? call.turns.at(-1)!.text : '';
+    if (!reminded && !out.replace(/\[HANGUP\]/g, '').trim() && /ไหมคะ|ไหมครับ|มั้ยคะ|หรือไม่|\?\s*$/.test(lastAi)) {
+      reminded = true;
+      const again = await callerClient.messages.create({ model: callerModel, max_tokens: 400, system: callerSystem(sc.persona, sc.lang),
+        messages: [...callerMsgs.slice(0, -1), { role: 'user', content: `${callerMsgs.at(-1)!.content}\n\n(The receptionist has asked you a question: answer it in words before you hang up.)` }], output_config: { effort: 'low' } });
+      callerUsage.calls++;
+      out = again.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ');
+    }
     // "ยืนยันจองเลยค่ะ ขอบคุณค่ะ [HANGUP]": what is said before the hang-up still reaches the receptionist (found 12 Nov
     // 2026: the whole turn, the "yes" included, used to be dropped).
     const hangup = out.includes('[HANGUP]'), said = out.replace(/\[HANGUP\]/g, '').trim();

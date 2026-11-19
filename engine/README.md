@@ -14,7 +14,7 @@ pushes them. Nothing here is deployed.
 
 ```bash
 npm run db:start      # project-local PostgreSQL 18 on 127.0.0.1:54421 (data in .data/, git-ignored)
-npm test              # 129 tests (resets the rcpt_test database per test)
+npm test              # 132 tests (resets the rcpt_test database per test)
 npm run sim           # seeds `rcpt` and plays three scripted calls, printing what each side receives
 npm run db:stop
 ```
@@ -80,7 +80,10 @@ npm run model:run -- --provider cerebras --models gpt-oss-120b --yes      # CERE
 npm run model:run -- --provider gemini --models gemini-3.8-flash --yes    # GEMINI_API_KEY in .env.local
 ```
 
-- Keys: `sh scripts/save-key.sh cerebras` (or `gemini`, `anthropic`): a hidden prompt; other saved keys are kept.
+- Keys: `sh scripts/save-key.sh cerebras` (or `gemini`, `groq`, `anthropic`): a hidden prompt; add `--clipboard` to take
+  a key you just copied, never shown; other saved keys are kept.
+- Groq (`--provider groq --models openai/gpt-oss-120b`): about 0.5 s a request, but the free tier allows 8,000 tokens a
+  minute and 1,000 requests a day per model; put the caller on another provider (`--caller-provider gemini`).
 - One caller model for every receptionist model keeps the comparison fair: `--caller-provider`, `--caller-model`
   (default: the first `--models` entry on the same provider).
 - Nothing is downloaded by the harness: a missing Ollama model stops the run with the `ollama pull` line to approve.
@@ -119,8 +122,10 @@ What the receptionist says goes to Google's free tier: use made-up names. The gr
 you tick it (policy `ai_disclosure`); asked, it always says so.
 
 You are the caller; the receptionist is the model you pick behind the same runtime the scenarios use, so every guard
-applies: Gemini 3.5 Flash-Lite by default (free tier, the fastest when Google is not busy; the words go to Google), or
-Gemma 4 12B or gpt-oss 20B on this Mac. It has a name (มิ้นท์ / Mint by default, set when you start), speaks in
+applies: "Fast" by default (gpt-oss 120B on Groq, about half a second a request, moving on to gpt-oss 20B and then
+Gemini 3.5 Flash-Lite when one is at its free-tier limit of 8,000 tokens a minute; the words go to Groq or Google; the
+key is `GROQ_API_KEY` in `.env.local`, saved with `sh scripts/save-key.sh groq`, or `--clipboard` to take a copied key
+unseen), or one model alone: gpt-oss on Groq, Gemini Flash-Lite, or Gemma 4 12B or gpt-oss 20B on this Mac. It has a name (มิ้นท์ / Mint by default, set when you start), speaks in
 everyday phrasing, and sends your words by itself when you stop talking. Choose Thai or English and who is calling:
 a new caller (+66 81 234 9001), a returning caller "บี" (+66 81 234 9002) who already has a Thai massage the day after
 tomorrow at 15:00, or a withheld number. Dates are today's real ones in Bangkok. Type, or press the microphone in
@@ -144,8 +149,9 @@ page a public https address with no account or DNS change:
 caffeinate -i cloudflared tunnel --no-autoupdate --config <an empty file> --url http://127.0.0.1:4520
 ```
 
-The address (`https://<words>.trycloudflare.com`) is new each time the tunnel starts, and it works only while this Mac
-is awake with the talk server, Ollama and the tunnel running. One call at a time: the visitor who starts a call owns it
+The address (`https://<words>.trycloudflare.com`) is new each time the tunnel starts (Cloudflare also drops a quick
+tunnel that has been away, e.g. overnight while the Mac slept: start a new one and update the repository's website link
+and the top README), and it works only while this Mac is awake with the talk server and the tunnel running. One call at a time: the visitor who starts a call owns it
 (a cookie); others hear the line is busy until it ends or has been quiet for 4 minutes. Only the caller acts as the
 owner for their call; Gemini voices only the receptionist's own lines; requests are rate-limited per visitor; the page
 is `noindex` and cannot be framed. A stable address (e.g. under o2-designstudio.com) would be a named tunnel and a DNS

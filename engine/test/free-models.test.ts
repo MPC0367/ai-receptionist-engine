@@ -9,7 +9,7 @@ import { createServer, type Server } from 'node:http';
 import { A, NUM, Call, CALLER, closeDb, fresh, sha, withTenant } from './helpers.ts';
 import { Receptionist } from '../sim/model/receptionist.ts';
 import { checkArgs, TOOL_SPECS } from '../sim/model/tools.ts';
-import { CompatClient, NO_THINK_CAP, PROVIDERS, QuotaError, fromOllama, fromOpenAI, toOpenAI, type CompatStats } from '../sim/model/free-models.ts';
+import { CompatClient, NO_THINK_CAP, PROVIDERS, QuotaError, fromOllama, fromOpenAI, salvage, toOpenAI, type CompatStats } from '../sim/model/free-models.ts';
 import { cost } from '../sim/model/run.ts';
 
 type Reply = { text?: string; tool?: { name: string; args: unknown }; cut?: boolean } | { status: number; retryAfter?: string };
@@ -245,6 +245,51 @@ test('rate limits: waits as told and retries; a quota that never lifts stops the
   assert.deepEqual(waits.filter(w => w > 0), [], 'a day-long wait is not slept through');
   brain = () => ({ status: 400 });
   await assert.rejects(stuck.messages.create({ model: 'stand-in', max_tokens: 50, messages: [{ role: 'user', content: 'x' }] }), /400/);
+});
+
+test(`a caller's own no to a text always wins: none is sent or offered (20 Nov 2026: "ไม่อยากได้ข้อความยืนยัน" was read as a request)`, async () => {
+  const { volunteersText, declinesText, yesNo } = await import('../sim/model/receptionist.ts');
+  for (const t of ['ใช่ค่ะ ถูกต้องเลย ยืนยันได้เลยค่ะ ไม่อยากได้ข้อความยืนยันนะคะ ขอบคุณค่ะ', 'ไม่ต้องการข้อความค่ะ', 'ไม่จำเป็นต้องส่งข้อความนะคะ', 'Yes please, no need for a text.', "Book it, but I don't want a text."]) {
+    assert.ok(declinesText(t), `declines: ${t}`);
+    assert.ok(!volunteersText(t), `not a request: ${t}`);
+  }
+  assert.equal(yesNo('ไม่อยากได้ค่ะ'), 'no'); assert.equal(yesNo('ไม่ต้องการค่ะ'), 'no');
+  assert.ok(volunteersText('อยากได้ข้อความยืนยันด้วยค่ะ'), 'a real request still counts');
+  const clock = await fresh();
+  const { call } = await Call.start({ dialed: NUM.A.dialed, ani: CALLER, now: () => clock.now() });
+  const client = new CompatClient({ provider: 'ollama', baseURL: `http://127.0.0.1:${port}` });
+  brain = booker;
+  const rec = new Receptionist(client, call, 'stand-in', 'ร้านสปาตัวอย่าง');
+  await rec.respond('ขอจองนวดไทย 60 พรุ่งนี้บ่ายสามค่ะ ชื่ออันนา');
+  const said = await rec.respond('ใช่ค่ะ ยืนยันเลย ไม่อยากได้ข้อความยืนยันนะคะ');
+  const texts = await withTenant(A, async tx => (await tx.query(`select count(*)::int n from outbox_events where payload->>'to' = $1`, [CALLER])).rows[0].n);
+  assert.equal(texts, 0, 'no text');
+  assert.ok(!/ข้อความ/.test(said), `no offer of a text either: ${said}`);
+  assert.equal(await withTenant(A, async tx => (await tx.query(`select count(*)::int n from appointments`)).rows[0].n), 1, 'still booked');
+});
+
+test('a tool call Groq refused over a null comes back as a call for the runtime to check; nothing usable is an empty reply', () => {
+  const body = JSON.stringify({ error: { code: 'tool_use_failed', message: 'parameters did not match schema', failed_generation: JSON.stringify({ name: 'request_owner_answer', arguments: { question_text: 'มีที่จอดรถไหม', summary_source: 'model', reply_target: { kind: 'ani' }, caller_preferred_name: null } }) } });
+  const r = salvage(body);
+  assert.equal(r.stop_reason, 'tool_use');
+  assert.equal(r.content[0].name, 'request_owner_answer');
+  assert.equal(r.content[0].input.caller_preferred_name, null, 'kept as sent: the runtime drops nulls itself');
+  assert.deepEqual(salvage(JSON.stringify({ error: { code: 'tool_use_failed', failed_generation: 'not json' } })).content, []);
+});
+
+test('Gemini 3 tool-call signatures: its own are passed back; calls by another model carry the skip value; Groq gets none (18–20 Nov 2026)', () => {
+  const msgs = { model: 'm', max_tokens: 10, messages: [
+    { role: 'user', content: 'จอง' },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'a', name: 'search_availability', input: {}, extra_content: { google: { thought_signature: 'SIG' } } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: '{}' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'b', name: 'hold_slot', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'b', content: '{}' }] },
+  ] };
+  const calls = (preset: any) => toOpenAI(msgs, preset).messages.flatMap((m: any) => m.tool_calls ?? []).map((c: any) => c.extra_content?.google?.thought_signature ?? null);
+  assert.deepEqual(calls(PROVIDERS.gemini), ['SIG', 'skip_thought_signature_validator']);
+  assert.deepEqual(calls(PROVIDERS.groq), [null, null], 'Groq never gets Google\'s field (a call Gemini answered earlier in the same call included)');
+  const fromGemini = fromOpenAI({ choices: [{ message: { content: null, tool_calls: [{ id: 'x', type: 'function', function: { name: 'hold_slot', arguments: '{}' }, extra_content: { google: { thought_signature: 'S2' } } }] }, finish_reason: 'tool_calls' }] }, { requests: 0, retries: 0, unparseableArgs: 0, toolCallsAsText: 0, tokens: 0 });
+  assert.equal(fromGemini.content[0].extra_content.google.thought_signature, 'S2', 'kept from the response');
 });
 
 test('Gemini preset: no additionalProperties anywhere (the runtime enforces it); effort becomes reasoning_effort', () => {
