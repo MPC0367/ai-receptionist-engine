@@ -149,9 +149,19 @@ page a public https address with no account or DNS change:
 caffeinate -i cloudflared tunnel --no-autoupdate --config <an empty file> --url http://127.0.0.1:4520
 ```
 
-The address (`https://<words>.trycloudflare.com`) is new each time the tunnel starts (Cloudflare also drops a quick
-tunnel that has been away, e.g. overnight while the Mac slept: start a new one and update the repository's website link
-and the top README), and it works only while this Mac is awake with the talk server and the tunnel running. One call at a time: the visitor who starts a call owns it
+That address (`https://<words>.trycloudflare.com`) is new each time and Cloudflare drops it when it has been away (it
+was, overnight). **Since 20 Nov 2026 the page has a permanent address, https://receptionist.o2-designstudio.com** (the
+owner's "Yes, set it up"): the named tunnel `o2-receptionist` in O2's Cloudflare account, a CNAME on o2-designstudio.com,
+and its own settings file `~/.cloudflared/o2-receptionist.yml` (only that name reaches port 4520; the o2-agent tunnel's
+`config.yml` is untouched; the credentials beside it are never printed or committed). Start it with:
+
+```bash
+caffeinate -i cloudflared tunnel --no-autoupdate --config ~/.cloudflared/o2-receptionist.yml run o2-receptionist
+```
+
+The preview entry sets `TALK_PUBLIC_HOST=receptionist.o2-designstudio.com` so the server answers that name. It works
+only while this Mac is awake with the talk server and the tunnel running. To take it down: stop the tunnel; to remove
+it: `cloudflared tunnel delete o2-receptionist` and delete the CNAME (both the owner's call). One call at a time: the visitor who starts a call owns it
 (a cookie); others hear the line is busy until it ends or has been quiet for 4 minutes. Only the caller acts as the
 owner for their call; Gemini voices only the receptionist's own lines; requests are rate-limited per visitor; the page
 is `noindex` and cannot be framed. A stable address (e.g. under o2-designstudio.com) would be a named tunnel and a DNS
