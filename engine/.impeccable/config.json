@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "dark-glow",
+        "value": "*",
+        "files": [
+          "sim/talk/page.html"
+        ],
+        "createdAt": "2026-11-19T17:36:03.816Z",
+        "reason": "The owner asked for a JARVIS-style voice HUD (18 Nov 2026: 'make the animation like jarvis'); the cyan glow inside the HUD panel is that look"
+      }
+    ]
+  }
+}
