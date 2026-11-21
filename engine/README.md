@@ -153,17 +153,31 @@ That address (`https://<words>.trycloudflare.com`) is new each time and Cloudfla
 was, overnight). **Since 20 Nov 2026 the page has a permanent address, https://receptionist.o2-designstudio.com** (the
 owner's "Yes, set it up"): the named tunnel `o2-receptionist` in O2's Cloudflare account, a CNAME on o2-designstudio.com,
 and its own settings file `~/.cloudflared/o2-receptionist.yml` (only that name reaches port 4520; the o2-agent tunnel's
-`config.yml` is untouched; the credentials beside it are never printed or committed). Start it with:
+`config.yml` is untouched; the credentials beside it are never printed or committed).
+
+**Since 21 Nov 2026 it starts by itself** (the owner's "make it run even when my mac restarts"): two launchd agents for
+the signed-in user, made by `scripts/autostart.sh`, start the talk page (PostgreSQL, then the server in public mode on
+4520) and the tunnel (under `caffeinate -is`, which holds off idle sleep) at every sign-in, and start either again
+within seconds if it stops:
+
+```bash
+sh scripts/autostart.sh install receptionist.o2-designstudio.com o2-receptionist
+sh scripts/autostart.sh status
+sh scripts/autostart.sh restart      # after changing the talk server's code
+sh scripts/autostart.sh uninstall    # back to starting it by hand
+```
+
+Logs are in `~/Library/Logs/O2 Receptionist/`. With FileVault on, a restarted Mac starts them only once someone signs
+in; a closed lid on battery still sleeps. The Browser pane's `ai-receptionist-talk` entry now only opens the running
+page. Run by hand instead (after `uninstall`):
 
 ```bash
 caffeinate -i cloudflared tunnel --no-autoupdate --config ~/.cloudflared/o2-receptionist.yml run o2-receptionist
 ```
 
-The preview entry sets `TALK_PUBLIC_HOST=receptionist.o2-designstudio.com` so the server answers that name. It works
-only while this Mac is awake with the talk server and the tunnel running. To take it down: stop the tunnel; to remove
-it: `cloudflared tunnel delete o2-receptionist` and delete the CNAME (both the owner's call). One call at a time: the visitor who starts a call owns it
+with `TALK_PUBLIC=1 TALK_PUBLIC_HOST=receptionist.o2-designstudio.com npm run talk` so the server answers that name.
+To remove the address: `cloudflared tunnel delete o2-receptionist` and delete the CNAME (both the owner's call). One call at a time: the visitor who starts a call owns it
 (a cookie); others hear the line is busy until it ends or has been quiet for 4 minutes. Only the caller acts as the
 owner for their call; Gemini voices only the receptionist's own lines; requests are rate-limited per visitor; the page
-is `noindex` and cannot be framed. A stable address (e.g. under o2-designstudio.com) would be a named tunnel and a DNS
-record in O2's Cloudflare account. Nothing reaches a phone, LINE or a calendar. What the first conversations found is at the end of
+is `noindex` and cannot be framed. Nothing reaches a phone, LINE or a calendar. What the first conversations found is at the end of
 `sim/model/FINDINGS.md`.
